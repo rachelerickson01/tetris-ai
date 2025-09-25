@@ -1,0 +1,16 @@
+
+/* calling the grid class here */
+.grid { 
+    width: 200px; /* allow for 20px height and width for the cells */
+    height: 400px;
+    display: flex;
+    flex-wrap: wrap; /* this arranges the cells within the grid rather than all vertical */
+    background-color: lavender;
+}
+
+/* this is for the "cells" within the grid */
+.grid div {
+    height: 20px;
+    width: 20px;
+    background-color: magenta;
+}

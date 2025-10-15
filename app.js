@@ -3,7 +3,7 @@
 document.addEventListener('DOMContentLoaded', () => {
 
     const grid = document.querySelector('.grid') // selects the grid class from index.html
-    let squares = Array.from(document.querySelectorAll('.grid div')) // creates array from grid elements 
+    let squares = Array.from(document.querySelectorAll('.grid div')) //  array from grid elements 
     const gridSpacing = 10
     const scoreDisplay = document.querySelector('#score')
     const startButton = document.querySelector('#start-button')
@@ -11,9 +11,47 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log(squares)
 })
 
+//-------------------------------------------------------------------------------------------------
 
+// dictionary for color picking in randomPieceColorIndex()
+const CellColorIndex = Object.freeze({BLACK: 0, RED: 1, GREEN: 2, BLUE: 3, YELLOW: 4, WHITE: 5, TRANSPARENT: 6})
+const CellColorTable = ["#000000", "#C00000", "#00C000", "#0000C0", "#C0C000", "#FFFFFF", "#000000"];
 
+// linear interpolation to find random spot between min and max values
+function linearInterp(a, b, t) { return a + t * (b - a); };
+function randomInt(min, max) { return Math.round(linearInterp(min, max, Math.random())); }
 
+// generates a color index for the randomly selected piece color
+function randomPieceColorIndex() {
+    const rand = Math.random(); // is there a use for this later?
+    const minIndex = CellColorIndex.BLACK + 1; // colors are between the black and white indexes
+    const maxIndex = CellColorIndex.WHITE -1; 
+    return randomInt(minIndex, maxIndex);
+}
+
+//------------------------------------------------------------------------------------------------- 
+
+// creates a point given x and y coordinates, with some helper functions
+class Point {
+    constructor(x, y) {
+        this.x = x
+        this.y = y
+    }
+
+    round() {
+        return new Point(Math.round(this.x), Math.round(this.y));
+    }
+    add(pt) {
+        return new Point(this.x + pt.x, this.y + pt.y);
+    }
+    sub(pt) {
+        return new Point(this.x - pt.x, this.y - pt.y);
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// this class enables us to have dynamic rectangle views of the griod
 class Rect {
 
     //constructs a rect given edge locations
@@ -67,11 +105,10 @@ class Rect {
 
     }
 
-    // returns new rect that is the union of rect and r 
-    // are we always working with rectangles of equal dimensions?? otherwise returned rect may include areas not in union polygon
+    // returns new rect that is the rect that contains the union of rect and r - including unoccupied areas
     union(r) {
 
-        if (this.empty()) return r.clone(); // union with empty set is equal to the non-empty set
+        if (this.empty()) return r.clone(); // union with empty set is equal to the non-empty set, regardless empty rect location
         if (r.empty()) return this.clone();
 
         return new Rect(Math.min(this.left, r.left), Math.min(this.top, r.top), 
@@ -102,7 +139,7 @@ class Rect {
 
     // performs relocation to specified location
     moveTo(x, y) {
-        this.offset(x - this.left, y - this.top) // confused about this logic
+        this.offset(x - this.left, y - this.top) 
     }
 
 

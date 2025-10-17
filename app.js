@@ -105,10 +105,11 @@ class Rect {
 
     }
 
-    // returns new rect that is the rect that contains the union of rect and r - including unoccupied areas
+    // returns new rect that contains the union of rect and r - including unoccupied areas
     union(r) {
 
-        if (this.empty()) return r.clone(); // union with empty set is equal to the non-empty set, regardless empty rect location
+        // union with empty set is equal to the non-empty set, regardless empty rect location
+        if (this.empty()) return r.clone(); 
         if (r.empty()) return this.clone();
 
         return new Rect(Math.min(this.left, r.left), Math.min(this.top, r.top), 
@@ -142,6 +143,61 @@ class Rect {
         this.offset(x - this.left, y - this.top) 
     }
 
-
-
 }   
+
+//-------------------------------------------------------------------------------------------------
+
+class IndexedImage {
+    #data;
+    #bounds;
+    #visibleBounds;
+
+    constructor(w, h, data = null) {
+        if (data) {
+            if (data.length < w * h) throw "IndexedImage bad dimensions";
+            this.#data = data;
+        } else {
+            this.#data = new Uint8Array(w * h); // 1D array initialized to zero by default
+        }
+        this.#bounds = new Rect(0, 0, w, h);
+        this.#visibleBounds = null;
+    }
+
+    // lightweight copy. returned IndexImage shares data with original (same memory location)
+    shallowClone() {
+        let clone = new IndexedImage(this.#bounds.width(), this.#bounds.height(), this.#data);
+        clone.moveTo(this.#bounds.left, this.#bounds.top) // moveTo vs assigning these?
+        // assigns visible bounds if original has #visibleBounds, otherwise assigns null
+        clone.#visibleBounds = this.#visibleBounds ? this.#visibleBounds.clone() : null;
+        return clone;
+    }
+
+    // creates IndexedImage from 2d array
+    static from2DArray(array) {
+        const rows = array.length; // num of 1d arrays in the 2d array
+        const cols = array[0].length; // length of the 1d arrays
+        let img = new IndexedImage(cols, rows);
+        for (let r = 0; r < rows; ++r) {
+            let index = img.index(0, r); // should make index private?
+            for (let c = 0; c < cols; ++c) {
+                img.#data[index++] = array[r][c];
+            }
+        }
+        return img;
+    }
+
+    fill(value) {
+        this.#data.fill(value);
+        this.#visibleBounds = null;
+    }
+
+    fillRect(r, value) {
+        const area = this.#bounds.intersection(r);
+        if (area.empty()) return;
+        for (let y = area.top; y < area.bottom; ++y) {
+            for (let x = area.left; x < area.right; ++x) {
+                this.setValueAt(x, y, value);
+            }
+        }
+    }
+}

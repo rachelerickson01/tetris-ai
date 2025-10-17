@@ -148,9 +148,9 @@ class Rect {
 //-------------------------------------------------------------------------------------------------
 
 class IndexedImage {
-    #data;
-    #bounds;
-    #visibleBounds;
+    #data; // data entries are color indices
+    #bounds;  // places the image in board coordinates
+    #visibleBounds; // bounds of rect that encompasses the non-transparent pixels
 
     constructor(w, h, data = null) {
         if (data) {
@@ -159,20 +159,21 @@ class IndexedImage {
         } else {
             this.#data = new Uint8Array(w * h); // 1D array initialized to zero by default
         }
-        this.#bounds = new Rect(0, 0, w, h);
+        this.#bounds = new Rect(0, 0, w, h); // (l, t, r, b) set at the origin
         this.#visibleBounds = null;
     }
 
-    // lightweight copy. returned IndexImage shares data with original (same memory location)
+    // lightweight copy. returned IndexImage shares data buffer with original (same memory location)!!
     shallowClone() {
         let clone = new IndexedImage(this.#bounds.width(), this.#bounds.height(), this.#data);
-        clone.moveTo(this.#bounds.left, this.#bounds.top) // moveTo vs assigning these?
+        clone.moveTo(this.#bounds.left, this.#bounds.top) // preserves location on board. why not assign?
         // assigns visible bounds if original has #visibleBounds, otherwise assigns null
         clone.#visibleBounds = this.#visibleBounds ? this.#visibleBounds.clone() : null;
         return clone;
     }
 
     // creates IndexedImage from 2d array
+    // REVIEW INDEX LOGIC
     static from2DArray(array) {
         const rows = array.length; // num of 1d arrays in the 2d array
         const cols = array[0].length; // length of the 1d arrays
@@ -200,4 +201,76 @@ class IndexedImage {
             }
         }
     }
+
+
+    // ADD COMMENTS
+    copyRect(srcRect, srcImage, dstX, dstY, mergeMode = false) {
+        const translation = new Point(dstX - srcRect.left, dstY - srcRect.top);
+        const transSrcImg = srcImage.shallowClone();
+        const transSrcRect = srcRect.clone();
+        transSrcImg.offset(translation.x, translation.y);
+        transSrcRect.offset(translation.x, translation.y);
+
+        const area = this.#bounds.intersection(transSrcRect).intersection(transSrcImg.bounds());
+        if (area.empty()) return;
+        for (let y = area.top; y < area.bottom; ++y) {
+            for (let x = area.left; x < area.right; ++x) {
+                const value = transSrcImg.valueAt(x, y);
+                // if mergeMode, transparent pixels are not copied
+                if (!mergeMode || (value != CellColorIndex.TRANSPARENT)) 
+                    this.setValueAt(x, y, value);
+            }
+        }
+    }
+
+    // merges values from image at the intersection of this and r
+    // does not copy transparent pixels since mergeMode == true
+    mergeRect(r, image) { this.copyRect(r, image, r.left, r.top, true) };
+
+    visibleBounds() {
+        if (!this.#visibleBounds) {
+            // initalize visibleBounds to empty and located at origin for fully transparent image
+            this.#visibleBounds = new Rect(this.#bounds.left, this.#bounds.top, this.#bounds.left, this.#bounds.top);
+            for (let y = this.#bounds.top; y < this.#bounds.bottom; ++y) {
+                let pixelRect = new Rect(this.#bounds.left, y, this.#bounds.left + 1, y + 1);
+                for (let x = this.#bounds.left; x < this.#bounds.right; ++x) {
+                    // collecting union of bounds for non transparent pixels
+                    if (this.valueAt(x, y) != CellColorIndex.TRANSPARENT) {
+                        this.#visibleBounds = this.#visibleBounds.union(pixelRect); 
+                    }
+                    pixelRect.offset(1, 0);
+                }
+            }
+        }
+        return this.#visibleBounds.clone()
+    }
+
+    // private method to convert 2d coordinates to 1d index into the #data array
+    // x, y are in image coord space; convert to local offset from origin
+    #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
+
+    bounds() { return this.#bounds.clone(); }
+
+    offset(x, y) {
+        this.#bounds.offset(x, y);
+        if (this.#visibleBounds)
+            this.#visibleBounds.offset(x, y);
+    }
+
+    moveTo(x, y) { this.offset(x - this.#bounds.left, y - this.#bounds.top); }
+
+    // x, y are in image coord space
+    valueAt(x, y) { return this.#data[this.#index(x, y)]; }
+
+    setValueAt(x, y, value) {
+        this.#data[this.#index(x, y)] = value;
+        // PERFORMANCE: clearing #visibleBounds guarantees internal consistency, however is inefficient.
+        // Would anticipate using setValueAt() heavily to be inefficient regardless
+        // Should focus on using well-crafted loops for direct memory stores
+        this.#visibleBounds = null;
+    }
 }
+
+//-------------------------------------------------------------------------------------------------
+
+

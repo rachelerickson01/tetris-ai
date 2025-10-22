@@ -17,13 +17,12 @@ document.addEventListener('DOMContentLoaded', () => {
 const CellColorIndex = Object.freeze({BLACK: 0, RED: 1, GREEN: 2, BLUE: 3, YELLOW: 4, WHITE: 5, TRANSPARENT: 6})
 const CellColorTable = ["#000000", "#C00000", "#00C000", "#0000C0", "#C0C000", "#FFFFFF", "#000000"];
 
-// linear interpolation to find random spot between min and max values
+// linear interpolation
 function linearInterp(a, b, t) { return a + t * (b - a); };
 function randomInt(min, max) { return Math.round(linearInterp(min, max, Math.random())); }
 
 // generates a color index for the randomly selected piece color
 function randomPieceColorIndex() {
-    const rand = Math.random(); // is there a use for this later?
     const minIndex = CellColorIndex.BLACK + 1; // colors are between the black and white indexes
     const maxIndex = CellColorIndex.WHITE -1; 
     return randomInt(minIndex, maxIndex);
@@ -273,4 +272,146 @@ class IndexedImage {
 
 //-------------------------------------------------------------------------------------------------
 
+// returns true if any visible (non transparent) pixels overlap between img1 and img2
+function visibleOverlap(img1, img2) {
+    const visOverlapRect = img1.visbleBounds().intersection(img2.visibleBounds());
+    if (visOverlapRect.empty()) return false; // returns false if rects do not overlap
+
+    // returns true as soon as a visible pixel overlap is found
+    for (let y = visOverlapRect.top; y < visOverlapRect.bottom; ++y) {
+        for (let x = visOverlapRect.left; x< visOverlapRect.right; ++x) {
+            if (img1.valueAt(x, y) != CellColorIndex.TRANSPARENT 
+            && img2.valueAt(x, y) != CellColorIndex.TRANSPARENT)
+                return true;
+        }
+    }
+
+    return false;
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// performs the transposition of srcImg using a transposition function that maps (x,y) to (x', y'))
+function transposeImage(srcImg, transposition) {
+    let dstImg = new IndexedImage(transposition.dstWidth, transposition.dstHeight)
+    // srcImg top left may be non-zero
+    // x, y are in local coordinate space (top left at 0, 0)
+    // dstImg is located at (0, 0)
+    for (let y = 0; y < srcImg.bounds().height(); ++y) {
+        for (let x = 0; x < srcImg.bounds().width(); ++x) {
+            const srcValue = srcImg.valueAt(srcImg.bounds().left + x, srcImg.bounds().top + y);
+            const dstCoord = transposition.transpose(x, y);
+            dstImg.setValueAt(dstCoord.x, dstCoord.y, srcValue);
+        }
+    }
+    const offset = srcImg.bounds().center().round().sub(dstImg.bounds().center().round());
+    dstImg.offset(offset.x, offset.y);
+    return dstImg;
+}
+
+//-------------------------------------------------------------------------------------------------
+
+//------------ ROTATION FUNCTIONS ------------------------
+
+// returns the transposed image of srcImg rotated clockwise
+function rotateCW(srcImg) {
+    let transposition = {
+        dstWidth: srcImg.bounds().height(),
+        dstheight: srcImg.bounds().width(),
+        transpose(srcX, srcY) { return { x: this.dstWidth - srcY - 1, y: srcX }; }
+    };
+    return transposeImage(srcImg, transposition);
+}
+
+// returns the transposed image of srcImg rotated counterclockwise
+// why img instead of srcImg?
+function rotateCCW(img) {
+    let transposition = {
+        dstWidth: img.bounds().height(),
+        dstHeight: img.bounds().width(),
+        transpose(srcX, srcY) { return { x: srcY, y: this.dstheight - srcX - 1 }; }
+    };
+    return transposeImage(img, transposition);
+}
+
+// returns the transposed image of srcImg rotated 180 degrees
+// is this used later on??
+function rotate180(img) {
+    let transposition = {
+        dstWidth: img.bounds().width(),
+        dstheight: img.bounds().height(),
+        transpose(srcX, srcY) { return { x: this.dstWidth - srcX - 1, y: this.dstHeight - srcY - 1}; }
+    }
+    return transposeImage(img, transposition);
+}
+
+//-------------------------------------------------------------------------------------------------
+
+//--------------- SHAPE FUNCTIONS ------------------------
+// these return an IndexedImage of the corresponding shape in the given color value
+
+//note to self: consider an alias for CellColorIndex.TRANSPARENT for readability
+
+function makeLImage(colorValue) {
+    const LImageArray = [   [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, colorValue]];
+    return IndexedImage.from2DArray(LImageArray);
+}
+
+function makeTImage(colorValue) {
+    const TImageArray = [   [CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                            [colorValue, colorValue, colorValue],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT]];
+    return IndexedImage.from2DArray(TImageArray);
+}
+
+function makeBarImage(colorValue) {
+    const barImageArray = [ [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT]];
+    return IndexedImage.from2DArray(barImageArray);
+}
+
+// any specific reason to choose this orientation over the horizontal spawning orientation?
+function makeSImage(colorValue) {
+    const SImageArray = [   [colorValue, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                            [colorValue, colorValue, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT]];
+    return IndexedImage.from2DArray(SImageArray);
+}
+
+// ----------ADDING THE Z, J AND SQUARE PIECES HERE----------------
+
+// making Z with same orientation as S for consistency here
+function makeZImage(colorValue) {
+    const ZImageArray = [   [CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT, colorValue],
+                            [CellColorIndex.TRANSPARENT, colorValue, colorValue],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT]];
+    return IndexedImage.from2DArray(ZImageArray);
+}
+
+function makeJImage(colorValue) {
+    const JImageArray = [   [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT],
+                            [CellColorIndex.TRANSPARENT, colorValue, CellColorIndex.TRANSPARENT],
+                            [colorValue, colorValue, CellColorIndex.TRANSPARENT]];
+    return IndexedImage.from2DArray(JImageArray);
+}
+
+function makeSquareImage(colorValue) {
+    const squareImageArray = [   [CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT, CellColorIndex.TRANSPARENT],
+                                 [CellColorIndex.TRANSPARENT, colorValue, colorValue],
+                                 [CellColorIndex.TRANSPARENT, colorValue, colorValue]];
+    return IndexedImage.from2DArray(squareImageArray);
+}
+
+// creates a random piece of random color index. Could later consider picking from a set without replacement 
+function makeRandomPiece() {
+    const makers = [makeBarImage, makeLImage, makeJImage, makeSImage, makeZImage, makeTImage, makeSquareImage];
+    const i = randomInt(0, makers.length - 1);
+    return makers[i](randomPieceColorIndex());
+}
+
+//-------------------------------------------------------------------------------------------------
 

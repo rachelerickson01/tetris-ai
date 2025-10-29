@@ -674,16 +674,19 @@ class GameState {
 
     startNewGame() {
         GameBoard.instance().resetBoard();
-        this.#phase = this.#phases.DESCENT;
-        this.#descentInfo.msRate = 1000;
-        this.#descentInfo.msStepTime = Date.now();
-        this.#timer = setInterval(this.handleTimer.bind(this), 100);
+        this.#phase = this.#phases.DESCENT; // begind descent
+        this.#descentInfo.msRate = 1000; // descend one row every 1000ms
+        this.#descentInfo.msStepTime = Date.now(); // tracking time of last row advance
+        this.#timer = setInterval(this.handleTimer.bind(this), 100); // executes handleTimer() every 100ms
     }
 
     endGame() {
         this.#phase = this.#phases.END;
         if (this.#timer) clearInterval(this.#timer);
-        // notes
+        // LATER: don't directly call a UI thing from here (in the model)
+        // make an anonymous notification system where the "app" can register (with a function) to be 
+        // notified of model changes. It will amount to calling the given callback functions. 
+        // That same notification system can also replace calls to updateDisplay() from here in GameState.
         adjustStartButton();
     }
 
@@ -717,14 +720,17 @@ class GameState {
 
     #stepDescent() {
         const msNow = Date.now();
+        // if 1000ms haven't passed, return and do not descend yet
         if (msNow - this.#descentInfo.msStepTime < this.#descentInfo.msRate) return;
         this.#descentInfo.msStepTime = msNow;
 
+        // piece is advanced down one row if offset is successful
+        // if unsuccessful, the piece is placed where it is.
         if (!GameBoard.instance().offsetPiece(0, 1)) {
-            GameBoard.instance().placeActivePiece();
+            GameBoard.instance().placeActivePiece(); 
             if (GameBoard.instance().hasCompletedRows()) {
                 this.#startRowCollapse();
-            } else if (!GameBoard.instance().startPiece()) {
+            } else if (!GameBoard.instance().startPiece()) { // game ends if start piece has invalid pos
                 this.endGame();
             }
         }
@@ -800,6 +806,7 @@ class GridDisplay {
 
 //-------------------------------------------------------------------------------------------------
 
+// updates the invalid area
 function updateDisplay() {
     GameBoard.instance().updateDisplay();
 }
@@ -822,6 +829,7 @@ function rotateBoardPieceCCW() {
 //-------------------------------------------------------------------------------------------------
 
 //REVISIT: should we allow for moving the piece up during descent?
+// Esp considering that it would allow the player to delay the descent of the next piece
 function handleKeyDown(event) {
     if (event.shiftKey) {
         switch(event.code) {

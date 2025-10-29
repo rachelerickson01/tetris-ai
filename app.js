@@ -2,13 +2,17 @@
 // Event listener - triggers when HTML file is finished loading
 document.addEventListener('DOMContentLoaded', () => {
 
-    const grid = document.querySelector('.grid') // selects the grid class from index.html
-    let squares = Array.from(document.querySelectorAll('.grid div')) //  array from grid elements 
-    const gridSpacing = 10
-    const scoreDisplay = document.querySelector('#score')
-    const startButton = document.querySelector('#start-button')
+    const grid = document.querySelector('.grid'); // selects the grid class from index.html
+    const gridSpacing = 10;
+    const scoreDisplay = document.querySelector('#score');
+    const startButton = document.querySelector('#start-button');
 
-    console.log(squares)
+    // Ready for display and play events after the page is loaded.
+    updateDisplay();
+    document.body.addEventListener("keydown", function(event) { handleKeyDown(event); });
+    startButton.onclick = handleStartButton;
+
+    tests();
 })
 
 //-------------------------------------------------------------------------------------------------
@@ -78,7 +82,7 @@ class Rect {
     // detects a zero-area or rect with negative edge lengths
     // origin (0,0) exists at grid's top-left position with all non-negative x, y
     empty() {
-        return (this.left >= this.right || this.top >= bottom);
+        return (this.left >= this.right || this.top >= this.bottom);
     }
     
     // ----------- GEOMETRY HELPER FUNCTIONS -----------
@@ -178,7 +182,7 @@ class IndexedImage {
         const cols = array[0].length; // length of the 1d arrays
         let img = new IndexedImage(cols, rows);
         for (let r = 0; r < rows; ++r) {
-            let index = img.index(0, r); // should make index private?
+            let index = img.#index(0, r); // should make index private?
             for (let c = 0; c < cols; ++c) {
                 img.#data[index++] = array[r][c];
             }
@@ -274,7 +278,7 @@ class IndexedImage {
 
 // returns true if any visible (non transparent) pixels overlap between img1 and img2
 function visibleOverlap(img1, img2) {
-    const visOverlapRect = img1.visbleBounds().intersection(img2.visibleBounds());
+    const visOverlapRect = img1.visibleBounds().intersection(img2.visibleBounds());
     if (visOverlapRect.empty()) return false; // returns false if rects do not overlap
 
     // returns true as soon as a visible pixel overlap is found
@@ -317,7 +321,7 @@ function transposeImage(srcImg, transposition) {
 function rotateCW(srcImg) {
     let transposition = {
         dstWidth: srcImg.bounds().height(),
-        dstheight: srcImg.bounds().width(),
+        dstHeight: srcImg.bounds().width(),
         transpose(srcX, srcY) { return { x: this.dstWidth - srcY - 1, y: srcX }; }
     };
     return transposeImage(srcImg, transposition);
@@ -329,7 +333,7 @@ function rotateCCW(img) {
     let transposition = {
         dstWidth: img.bounds().height(),
         dstHeight: img.bounds().width(),
-        transpose(srcX, srcY) { return { x: srcY, y: this.dstheight - srcX - 1 }; }
+        transpose(srcX, srcY) { return { x: srcY, y: this.dstHeight - srcX - 1 }; }
     };
     return transposeImage(img, transposition);
 }
@@ -339,7 +343,7 @@ function rotateCCW(img) {
 function rotate180(img) {
     let transposition = {
         dstWidth: img.bounds().width(),
-        dstheight: img.bounds().height(),
+        dstHeight: img.bounds().height(),
         transpose(srcX, srcY) { return { x: this.dstWidth - srcX - 1, y: this.dstHeight - srcY - 1}; }
     }
     return transposeImage(img, transposition);
@@ -517,7 +521,7 @@ class GameBoard {
                 if (x == newBounds.left) continue; // this location is already known to fail
                 newPiece.moveTo(x, newPiece.bounds().top);
                 if (this.#validPosition(newPiece)) {
-                    this.ipdatePiece(newPiece);
+                    this.updatePiece(newPiece);
                     return true;
                 }
             }
@@ -627,4 +631,254 @@ class GameBoard {
         }
     }
     
+}
+
+//-------------------------------------------------------------------------------------------------
+
+class GameState {
+    #phases;
+    #phase;
+    #resumePhase;
+    #descentInfo;
+    #collapseStepTime;
+    #timer;
+    static #theInstance = null;
+
+    constructor() {
+        this.#phases = Object.freeze({READY: 0, DESCENT: 1, COLLAPSE: 2, PAUSE: 3, END: 4})
+        this.#phase = this.#phases.READY; // start in the ready phase
+        this.#resumePhase = this.#phases.DESCENT; // when resuming the game, the descent phase occurs
+        this.#descentInfo = { msStepTime: 0, msRate: 1000 };
+        this.#collapseStepTime = 0;
+        this.#timer = null;
+    }
+
+    // Should be only one GameState instance
+    static instance() {
+        if (!GameState.#theInstance) {
+            GameState.#theInstance = new GameState();
+        }
+        return GameState.#theInstance // return existing instance if already exists
+    }
+
+    ready() { return this.#phase == this.#phases.READY; }
+    gameOver() { return this.#phase == this.#phases.END; }
+    paused() { return this.#phase == this.#phases.PAUSE; }
+    playing() { return this.#phase == this.#phases.DESCENT || this.#phase == this.#phases.COLLAPSE; }
+
+    startButtonClicked() {
+        if (this.playing()) this.pause();
+        else if (this.paused()) this.resume();
+        else this.startNewGame();
+    }
+
+    startNewGame() {
+        GameBoard.instance().resetBoard();
+        this.#phase = this.#phases.DESCENT;
+        this.#descentInfo.msRate = 1000;
+        this.#descentInfo.msStepTime = Date.now();
+        this.#timer = setInterval(this.handleTimer.bind(this), 100);
+    }
+
+    endGame() {
+        this.#phase = this.#phases.END;
+        if (this.#timer) clearInterval(this.#timer);
+        // notes
+        adjustStartButton();
+    }
+
+    pause() {
+        if (!this.playing()) return;
+        if (this.#timer) clearInterval(this.#timer);
+        this.#resumePhase = this.#phase; // store pre-pause phase
+        this.#phase = this.#phases.PAUSE;
+    }
+
+    resume() {
+        if (this.paused()) {
+            this.#phase = this.#resumePhase;
+            const msNow = Date.now();
+            if (this.#phase == this.#phases.DESCENT) this.#descentInfo.msStepTime = msNow;
+            else if (this.#phase == this.#phase.COLLAPSE) this.#collapseStepTime = msNow;
+            this.#timer = setInterval(this.handleTimer.bind(this), 100);
+        }
+    }
+
+    handleTimer() {
+        if (this.#phase == this.#phases.DESCENT) this.#stepDescent();
+        else if (this.#phase == this.#phases.COLLAPSE) this.#stepCollapse();
+    }
+
+    #startDescent() {
+        this.#phase = this.#phases.DESCENT;
+        this.#descentInfo.msStepTime = Date.now();
+        if (!GameBoard.instance().startPiece()) this.endGame();
+    }
+
+    #stepDescent() {
+        const msNow = Date.now();
+        if (msNow - this.#descentInfo.msStepTime < this.#descentInfo.msRate) return;
+        this.#descentInfo.msStepTime = msNow;
+
+        if (!GameBoard.instance().offsetPiece(0, 1)) {
+            GameBoard.instance().placeActivePiece();
+            if (GameBoard.instance().hasCompletedRows()) {
+                this.#startRowCollapse();
+            } else if (!GameBoard.instance().startPiece()) {
+                this.endGame();
+            }
+        }
+        updateDisplay();
+    }
+
+    #startRowCollapse() {
+        this.#phase = this.#phases.COLLAPSE;
+        this.#collapseStepTime = Date.now();
+    }
+
+    #stepCollapse() {
+        const msNow = Date.now();
+        if (msNow - this.#collapseStepTime < 1000) return;
+
+        GameBoard.instance().collapseCompletedRows();
+        this.#startDescent();
+        updateDisplay();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// GridDisplay class is for displaying the game board composite in the browser
+
+class GridDisplay {
+    #bounds;
+    #squares;
+    static #theInstance = null;
+
+    constructor() {
+        this.#squares = Array.from(document.querySelectorAll('.grid div')) // 1D array from grid elements
+        this.#bounds = new Rect(0, 0, 10, 20); // REVISIT: find a central place to retrieve the grid dimension
+    }
+
+    // Should only be one GridDisplay instance
+    static instance() {
+        if (!GridDisplay.#theInstance) {
+            GridDisplay.#theInstance = new GridDisplay();
+        }
+        return GridDisplay.#theInstance;
+    }
+
+        // #squares is a 1D array; convert 2D coordinates to a 1D index.
+        #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
+
+        width() { return this.#bounds.width(); }
+        height() { return this.#bounds.height(); }
+        bounds() { return this.#bounds.clone(); }
+    
+        // color can be a name or hex string
+        setColorAt(x, y, color) { this.#squares[this.#index(x,y)].style.backgroundColor = color; }
+
+        // Display the given image within the given area. The area rect can be used to
+        // limit the extent of the update (versus always updating the entire board).
+        // image is 8-bit with color index values.
+        displayImage(image, area) {
+            const workArea = this.#bounds.intersection(image.bounds()).intersection(area);
+            if (workArea.empty()) return;
+            for (let y = workArea.top; y < workArea.bottom; ++y) {
+                for (let x = workArea.left; x < workArea.right; ++x) {
+                    const colorIndex = image.valueAt(x, y);
+                    if (colorIndex != CellColorIndex.TRANSPARENT) {
+                        this.setColorAt(x, y, CellColorTable[image.valueAt(x, y)]);
+                    } else {
+                        this.setColorAt(x, y, "#404040"); // dark gray for now
+                    }
+                }
+            }
+        }
+
+}
+
+//-------------------------------------------------------------------------------------------------
+
+function updateDisplay() {
+    GameBoard.instance().updateDisplay();
+}
+
+function offsetBoardPiece(x, y) {
+    // REVISIT: consider calling a GameState function for offset and rotate instead of calling
+    // the GameBoard directly. The updateDisplay() call is still probably appropriate here
+    // (want to minimize "view" considerations down in the GameState and GameBoard "model").
+    if (GameBoard.instance().offsetPiece(x, y)) updateDisplay();
+}
+
+function rotateBoardPieceCW() {
+    if (GameBoard.instance().rotatePieceCW()) updateDisplay();
+}
+
+function rotateBoardPieceCCW() {
+    if (GameBoard.instance().rotatePieceCCW()) updateDisplay();
+}
+
+//-------------------------------------------------------------------------------------------------
+
+//REVISIT: should we allow for moving the piece up during descent?
+function handleKeyDown(event) {
+    if (event.shiftKey) {
+        switch(event.code) {
+            case 'ArrowLeft':   rotateBoardPieceCCW();  break;
+            case 'ArrowRight':  rotateBoardPieceCW();   break;
+            case 'ArrowDown':   rotateBoardPieceCW();   break;
+            case 'ArrowUp':     rotateBoardPieceCCW();  break;
+         }
+    } else {
+        switch (event.code) {
+            case 'ArrowLeft':   offsetBoardPiece(-1, 0);   break;
+            case 'ArrowRight':  offsetBoardPiece(1, 0);    break;
+            case 'ArrowDown':   offsetBoardPiece(0, 1);    break;
+            case 'ArrowUp':     offsetBoardPiece(0, -1);   break; // see above REVISIT
+       }
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+function adjustStartButton() {
+    const startButton = document.querySelector('#start-button');
+    if (GameState.instance().playing()) startButton.value = "Pause";
+    else if (GameState.instance().paused()) startButton.value = "Resume";
+    else if (GameState.instance().gameOver()) startButton.value = "Play Again";
+    else startButton.value = "Play";
+}
+
+function handleStartButton() {
+    GameState.instance().startButtonClicked();
+    adjustStartButton();
+    updateDisplay();
+}
+
+//-------------------------------------------------------------------------------------------------
+
+function testIndexedImage() {
+    const img = makeTImage(CellColorIndex.RED);
+    img.visibleBounds(); // force calculation
+    const imgClone = img.shallowClone();
+    // We expect img and imgClone to share the same memory buffer; altering a value in one should be reflected in the other.
+    imgClone.setValueAt(1, 1, CellColorIndex.GREEN);
+    console.log("testIndexedImage() img(1,1): " + img.valueAt(1,1) + " imgClone(1,1): " + imgClone.valueAt(1,1));
+
+    imgClone.offset(1, 1);
+    console.log("testIndexedImage() img and imgClone visibible overlap: " + (visibleOverlap(img, imgClone) ? "true" : "false"));
+
+    console.log("testIndexedImage() starting visible bounds: " + img.visibleBounds());
+    img.moveTo(5, 9);
+    console.log("testIndexedImage() visible bounds after move to [5,9]: " + img.visibleBounds());
+
+    const img2 = rotateCCW(img);
+    console.log("testIndexedImage() visible bounds after rotate CCW: " + img2.visibleBounds());
+}
+
+//-------------------------------------------------------------------------------------------------
+
+function tests() {
+    testIndexedImage();
 }

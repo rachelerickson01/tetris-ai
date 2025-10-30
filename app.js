@@ -18,8 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
 //-------------------------------------------------------------------------------------------------
 
 // dictionary for color picking in randomPieceColorIndex()
-const CellColorIndex = Object.freeze({BLACK: 0, RED: 1, GREEN: 2, BLUE: 3, YELLOW: 4, WHITE: 5, TRANSPARENT: 6})
-const CellColorTable = ["#000000", "#C00000", "#00C000", "#0000C0", "#C0C000", "#FFFFFF", "#000000"];
+const CellColorIndex = Object.freeze({BLACK: 0, RED: 1, GREEN: 2, BLUE: 3, YELLOW: 4, WHITE: 5, TRANSPARENT: 6, GRAY: 7})
+const CellColorTable = ["#000000", "#C00000", "#00C000", "#0000C0", "#C0C000", "#FFFFFF", "#000000", "#808080"];
 
 // linear interpolation
 function linearInterp(a, b, t) { return a + t * (b - a); };
@@ -182,7 +182,7 @@ class IndexedImage {
         const cols = array[0].length; // length of the 1d arrays
         let img = new IndexedImage(cols, rows);
         for (let r = 0; r < rows; ++r) {
-            let index = img.#index(0, r); // should make index private?
+            let index = img.#index(0, r); 
             for (let c = 0; c < cols; ++c) {
                 img.#data[index++] = array[r][c];
             }
@@ -427,6 +427,7 @@ class GameBoard {
     #compositeImage; // combination of placed pieces and active piece
     #stackImage; // placed pieces
     #activePiece; // descending piece
+    #ghostPiece // ghost piece to mirror active piece
     #invalRect;
     #completedRowSet;
     static #theInstance;
@@ -440,6 +441,7 @@ class GameBoard {
         this.#stackImage.fill(CellColorIndex.TRANSPARENT);
         this.#completedRowSet = new Set();
         this.#activePiece = null;
+        this.#ghostPiece = null;
     }
 
     // static instance because we should only have one instance of the GameBoard.
@@ -489,6 +491,21 @@ class GameBoard {
         return true;
     }
 
+    // private function to find where to place the ghost piece
+    // (how far the active piece could descend before colliding in its current x position)
+    #findGhostPosition(piece) {
+        let ghost = piece.shallowClone() // shallow clone of the active piece
+        
+        // move down until invalid position is found
+        while (this.#validPosition(ghost)) {
+            ghost.offset(0, 1); // trying to reserve use of offsetPiece() for only the activePiece
+        }
+
+        // go back one position since the while loop will have performed one too many offsets
+        ghost.offset(0, -1);
+        return ghost;
+    }
+
     // returns true if piece can be legally offset
     offsetPiece(x, y) {
         if (!this.#activePiece) return false;
@@ -535,20 +552,44 @@ class GameBoard {
     rotatePieceCCW() { return this.rotatePiece(false); }
 
     updatePiece(newPiece) {
-        // inval to erase at the old location and draw at the new location
+        //invalidate old active piece location
         if (this.#activePiece) {
-            this.invalComposite(this.#activePiece.visibleBounds());
+            this.invalComposite(this.#activePiece.visibleBounds()); 
         }
+        
+        // invalidate old ghost piece location
+        if (this.#ghostPiece) {
+            this.invalComposite(this.#ghostPiece.visibleBounds()); 
+        }
+        
+        // invalidate new active piece location
         if (newPiece) {
-            this.invalComposite(newPiece.visibleBounds());
+            this.invalComposite(newPiece.visibleBounds()); //invalidate new location
         }
+        
+        // update new piece
         this.#activePiece = newPiece;
+
+        //update the ghost piece whenever the active piece is updated
+        if (newPiece) {
+            this.#ghostPiece = this.#findGhostPosition(newPiece); //update ghost location based on new activePiece
+            this.invalComposite(this.#ghostPiece.visibleBounds()); // invalidate new ghost piece location
+        } else {
+            this.#ghostPiece = null;
+        }
     }
 
     // Copy the acive piece into the stack of placed pieces
     placeActivePiece() {
         if (this.#activePiece) {
             const visBounds = this.#activePiece.visibleBounds();
+
+            // clearing the ghost piece before merging the activePiece with stack
+            // this prevents the placed piece from appearning as the ghost piece for a moment
+            if (this.#ghostPiece) {
+                this.invalComposite(this.#ghostPiece.visibleBounds())
+                this.#ghostPiece = null;
+            }
             this.#stackImage.mergeRect(visBounds, this.#activePiece);
             this.#activePiece = null;
             this.markCompletedRows(visBounds.top, visBounds.bottom);
@@ -616,8 +657,29 @@ class GameBoard {
         if (!this.#invalRect.empty()) {
             this.#compositeImage.fillRect(this.#invalRect, CellColorIndex.TRANSPARENT);
             this.#compositeImage.mergeRect(this.#stackImage.bounds().intersection(this.#invalRect), this.#stackImage);
+
+            // draw ghost piece
+            if (this.#ghostPiece) {
+                const ghostBounds = this.#ghostPiece.bounds().intersection(this.#invalRect);
+                //this.#compositeImage.mergeRect(ghostBounds, this.#ghostPiece.shallowClone())  
+                // omitting mergeRect here to draw pixels manually
+                // this way we can recolor them differently than activePiece as the composite is updated
+                for (let y = ghostBounds.top; y < ghostBounds.bottom; ++y) {
+                    for (let x = ghostBounds.left; x < ghostBounds.right; x++) {
+                        const value = this.#ghostPiece.valueAt(x, y);
+                        if (value != CellColorIndex.TRANSPARENT) {
+                            this.#compositeImage.setValueAt(x, y, CellColorIndex.GRAY);
+                        }
+                    }
+                }
+            }
+
+            // draw active piece
             if (this.#activePiece) {
-                this.#compositeImage.mergeRect(this.#activePiece.bounds().intersection(this.#invalRect), this.#activePiece);
+                // added const activeBounds to mirror ghostBounds above
+                // just for readability and to be consistent
+                const activeBounds = this.#activePiece.bounds().intersection(this.#invalRect) 
+                this.#compositeImage.mergeRect(activeBounds, this.#activePiece);
             }
             this.#invalRect = Rect.makeEmpty();
         }

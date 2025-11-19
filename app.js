@@ -491,6 +491,11 @@ class GameBoard {
         return true;
     }
 
+    // helper function to call validPosition() later on for qLearning
+    isValidPosition(piece) {
+        return this.#validPosition(piece);
+    }
+
     // private function to find where to place the ghost piece
     // (how far the active piece could descend before colliding in its current x position)
     #findGhostPosition(piece) {
@@ -952,3 +957,146 @@ function testIndexedImage() {
 function tests() {
     testIndexedImage();
 }
+
+
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+
+// this is the Q-learning agent
+class QLearning {
+
+    constructor(lr = 0.1, gamma = 0.9, epsilon = 0.1) {
+        // this is our q table. stores values: { state ==> [q_action_0, q_action_1, ...]}
+        this.qTable = new Map(); 
+        this.lr = lr; // ALPHA, the learning rate
+        this.gamma = gamma; // DISCOUNT FACTOR, how much to value future rewards
+        this.epsilon = epsilon; // EXPLORATION RATE, probability a random action (exploration) will be taken
+    }
+
+    // returns the qTable entry for the given state
+    // available: list of all legal placements for the active piece. comes from enumeratePlacements
+    getQ(state, available) {
+        // if current state does not exists in qTable, created an entry with values of 0
+        if (!this.qTable.has(state)) {
+            // creates an array sized to the number of possible placements. Initialized to zeros
+            this.qTable.set(state, new Float32Array(available.length)); 
+        }
+        return this.qTable.get(state);
+        
+    }
+
+    getAction(state, available){
+        // if less than epsilon, explore. else, exploit
+        if (Math.random() < this.epsilon) {
+            // ~~ is a double bitwise NOT operator, which is apparently faster than math.floor()
+            return available[~~(Math.random() * available.length)]; // returns a random action
+        }
+        const q = this.getQ(state, available);
+        return available.reduce((best, a) => q[a] > q[best] ? a : best, available[0]) // returns best known move
+    }
+
+    // This is that q-learning function:
+    // Q(s, a) ← Q(s, a) + α [r + γ max(a') Q(s', a') − Q(s, a)]
+    update(s, a, r, s2, available2) {
+        const q = this.getQ(s);
+        const maxQ2 = available2.length ? Math.max(...available2.map(a_prime => this.getQ(s2)[a_prime])) : 0;
+        q[a] += this.lr * (r + this.gamma * maxQ2 - q[a]); // updating the q-value for this action
+    }
+
+    // ----------- HELPER FUNCTIONS -----------------------------
+
+    decay() {
+        const decayValue = 0.995; // value could be adjusted later
+        this.epsilon = Math.max(0.01, this.epsilon * decayValue);
+    }
+
+    reset() {
+        this.q.clear();
+        this.epsilon = 0.1;
+    }
+
+    save() {
+        const data = {
+            q: Array.from(this.q.entries()),
+            lr: this.lr,
+            gamma: this.gamma,
+            epsilon: this.epsilon
+        };
+        // This will let me track the contents of the qTable entries after a session
+        // I think I can use console.log() to read this too
+        // also will allow the agent to pick up where it left off
+        localStorage.setItem('tetris_qLearning_ai', JSON.stringify(data));
+    }
+
+    load() {
+        const saved = localStorage.getItem('tetris_qLearning_ai');
+        if (!saved) return false;
+
+        try {
+            const data = JSON.parse(saved);
+            this.q = new Map(data.q); // creates new map from existing data array in save()
+            this.lr = data.lr;
+            this.gamma = data.gamma;
+            this.epsilon = data.epsilon;
+            return true;
+        } catch (e) {
+            console.error("Failed to load AI state: ", e);
+            return false;
+        }
+    }
+
+    clearStorage() {
+        localStorage.removeItem('tetris_qLearning_ai');
+    }
+}
+
+function enumeratePlacements(board, piece) {
+    const placements = [];
+    const rotations = getUniqueRotations(piece);
+
+    // iterate through each rotation position
+    for (let r = 0; r < rotations.length; r++) {
+        const rotated = rotations[r];
+
+        // iterate through each horizontal position
+        // -2 and +2 here allow for pieces like "I" to be at the edge of board when rotated
+        // but I'm not sure if that's the best way to do this or if the value of 2 is correct
+        for (let x = -2; x < board.width() + 2; x++) {
+            let testPiece = rotated.shallowClone();
+            testPiece.moveTo(x, testPiece.bounds().top);
+
+            // skip if out of bounds
+            if (!board.isValidPosition(testPiece)) continue; 
+
+            // this is the same logic as findGhostPosition(piece)
+            // is there a better way to just access the findGhostPosition logic?
+            while (board.isValidPosition(testPiece)) {
+                testPiece.offset(0, 1);
+            }
+            testPiece.offset(0, -1);
+
+            // example placements entry: placements = [{ rotation: 0, x: 3, piece: <clone> }, ...]
+            // I think having rotation and x position will be good if I want to look at the data later
+            // ...but might only be necessary to have the testPiece clone itself.
+            // The testPiece can be used later to place piece when action is chosen
+            if (board.isValidPosition(testPiece)) {
+                placements.push({ rotation: r, x, piece: testPiece });
+            }
+        }
+    }
+    return placements;
+}
+
+// TODO: -----------------------------------------
+// add function getUniqueRotations()
+// define state index (64-bit)
+// define retrieval of top 5 rows of board. Is there a place in code should I access this from?
+// and probably lots more :)
+
+// NOTES TO SELF:
+// the board is called in enumeratePlacements(). Should this be the top 5 rows, or the whole board?
+// I would think the top 5 rows should be used for the key, but not necessarily for enumerating placements.
+// It might be unnecessary to have 'available' present in arguments for both getQ() and getAction()

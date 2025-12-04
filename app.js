@@ -205,9 +205,10 @@ class IndexedImage {
         }
     }
 
-
-    // ADD COMMENTS
+    // takes a rect from source image and copies it into this image
     copyRect(srcRect, srcImage, dstX, dstY, mergeMode = false) {
+        // Translates a shallow copy of the srcImage and srcRect
+        // so that the source image and this image are in the same coordinate space
         const translation = new Point(dstX - srcRect.left, dstY - srcRect.top);
         const transSrcImg = srcImage.shallowClone();
         const transSrcRect = srcRect.clone();
@@ -224,6 +225,17 @@ class IndexedImage {
                     this.setValueAt(x, y, value);
             }
         }
+    }
+
+    // returns a new image that is a sub rect of this image
+    // returns null if rect does not itersect with this image
+    subImage(rect) {
+        const srcRect = this.#bounds.intersection(rect); // find intersect of rect and this
+        if (srcRect.empty()) return null;
+        var image = new IndexedImage(srcRect.width(), srcRect.height()); // new image
+        image.moveTo(srcRect.left, srcRect.top) // position to location of source rect
+        image.copyRect(srcRect, this, srcRect.left, srcRect.top);
+        return image;
     }
 
     // merges values from image at the intersection of this and r
@@ -311,6 +323,29 @@ function transposeImage(srcImg, transposition) {
     const offset = srcImg.bounds().center().round().sub(dstImg.bounds().center().round());
     dstImg.offset(offset.x, offset.y);
     return dstImg;
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// fills holes and fills in the overhang "shadow" for the purpose of qTable keys redundancy
+function fillHolesAndOverhangs(image) {
+    const bounds = image.bounds();
+    // for each column, scan fom top down
+    // for any non-transparent pixel, fill in any transparent pixels below
+    for (x = bounds.left; x < bounds.right; ++x) {
+        var filling = false;
+        for (y = bounds.top; y < bounds.bottom; ++y) {
+            if (filling) {
+                if (image.valueAt(x, y) == CellColorIndex.TRANSPARENT) {
+                    // fill color is arbitrary, just chose white to distinguish from shape colors
+                    image.setValueAt(x, y, CellColorIndex.WHITE);
+                }
+            }
+            else {
+                filling = (image.valueAt(x, y) != CellColorIndex.TRANSPARENT);
+            }
+        }
+    }
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -411,10 +446,13 @@ function makeSquareImage(colorValue) {
 }
 
 // creates a random piece of random color index. Could later consider picking from a set without replacement 
+// returns an object having the piece and its shape index number
 function makeRandomPiece() {
     const makers = [makeBarImage, makeLImage, makeJImage, makeSImage, makeZImage, makeTImage, makeSquareImage];
-    const i = randomInt(0, makers.length - 1);
-    return makers[i](randomPieceColorIndex());
+    const result = {}
+    result.index = randomInt(0, makers.length - 1);
+    result.piece = makers[result.index](randomPieceColorIndex());
+    return result;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -456,7 +494,8 @@ class GameBoard {
     bounds() { return this.#compositeImage.bounds(); }
 
     startPiece() {
-        const piece = makeRandomPiece();
+        const randomPiece = makeRandomPiece();
+        const piece = randomPiece.piece // returns the piece component of the object
         // drop new piece at the top middle of the game board with its bottom row visible
         const visBounds = piece.visibleBounds();
         const left = Math.round((this.bounds().width() - visBounds.width()) / 2); 
@@ -467,7 +506,20 @@ class GameBoard {
 
         this.#activePiece = piece;
         this.invalComposite(piece.visibleBounds());
+        
+        // test code
+        // prints in hex and binary
+        const stackKey = this.stackTopKey();
+        console.log("startPiece() - stack key: " + stackKey.toString(16) + ", " + stackKey.toString(2))
+
+        const pieceKey = randomPiece.index * (2 ** 50); // shift to the upper range to prevent overlap?
+        console.log("startPiece() - piece key: " + pieceKey.toString(16) + ", " + pieceKey.toString(2));
+
+        const stateKey = stackKey + pieceKey;
+        console.log("startPiece() - state key: " + stateKey.toString(16) + ", " + stateKey.toString(2));
+
         return true;
+    
     }
 
     // resets the board to begin a new game
@@ -651,6 +703,8 @@ class GameBoard {
 
     hasCompletedRows() { return (this.#completedRowSet.size > 0); }
 
+    completedRowCount() { return this.#completedRowSet.size; }
+
     invalComposite(r) {
         if (r) {
             this.#invalRect = this.#invalRect.union(r).intersection(this.bounds());
@@ -694,10 +748,57 @@ class GameBoard {
         const area = this.#invalRect;
         if (!area.empty()) {
             this.updateComposite();
-            GridDisplay.instance().displayImage(this.#compositeImage, area);
+            BoardDisplay.instance().displayImage(this.#compositeImage, area);
         }
     }
-    
+
+    // returns an image from the top five rows of the stack image
+    stackTopImage() {
+        var stackTopBounds = this.#stackImage.bounds();
+        const visBounds = this.#stackImage.visibleBounds();
+        if (visBounds.empty()) {
+            stackTopBounds.top = stackTopBounds.bottom - 5;
+        } else {
+            // assume that visBounds extends to bottom of the stack image
+            if (visBounds.top + 5 > stackTopBounds.bottom) {
+                stackTopBounds.top = stackTopBounds.bottom - 5;
+            } else {
+                stackTopBounds.top = visBounds.top;
+                stackTopBounds.bottom = visBounds.top + 5;
+            }      
+        }
+        return this.#stackImage.subImage(stackTopBounds);
+    }
+
+    stackTopKey() {
+        var stackTopImage = this.stackTopImage();
+        fillHolesAndOverhangs(stackTopImage);
+        stackTopImage.moveTo(0, 0);
+        const stackTopBounds = stackTopImage.bounds();
+        StackKeyDisplay.instance().displayImage(stackTopImage, stackTopBounds);
+
+        var keyNum = 0;
+        var bitIndex = 0;
+
+        // scan the cells from top to bottom, left to right
+        // top left cell corresponds to lowest bit in the 50-bit number
+        // bottom right corresponds to highest bit in the 50-bit number
+        // this arrangement allows for the key to be consistently calculated
+
+        for (var y = stackTopBounds.top; y < stackTopBounds.bottom; ++y) {
+            for (var x = stackTopBounds.left; x < stackTopBounds.right; ++x) {
+                const pixelValue = this.#stackImage.valueAt(x, y);
+                if (pixelValue!= CellColorIndex.TRANSPARENT) {
+                    // need 50 bits so can't use typical bitwise operations (would convert to 32-bit)
+                    const bitMask = 2 ** bitIndex;
+                    keyNum += bitMask
+                }
+                ++bitIndex;
+            }
+        }
+        return keyNum
+    }
+
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -709,6 +810,7 @@ class GameState {
     #descentInfo;
     #collapseStepTime;
     #timer;
+    #score
     static #theInstance = null;
 
     constructor() {
@@ -732,6 +834,7 @@ class GameState {
     gameOver() { return this.#phase == this.#phases.END; }
     paused() { return this.#phase == this.#phases.PAUSE; }
     playing() { return this.#phase == this.#phases.DESCENT || this.#phase == this.#phases.COLLAPSE; }
+    score() { return this.#score;}
 
     startButtonClicked() {
         if (this.playing()) this.pause();
@@ -771,6 +874,13 @@ class GameState {
             if (this.#phase == this.#phases.DESCENT) this.#descentInfo.msStepTime = msNow;
             else if (this.#phase == this.#phase.COLLAPSE) this.#collapseStepTime = msNow;
             this.#timer = setInterval(this.handleTimer.bind(this), 100);
+        }
+    }
+
+    offsetPiece(x, y) {
+        if (GameBoard.instance().offsetPiece(x, y)) {
+            if (y > 0) this.#score++; // score increases by 1 for each manual descent
+            updateDisplay();
         }
     }
 
@@ -826,52 +936,87 @@ class GameState {
 class GridDisplay {
     #bounds;
     #squares;
-    static #theInstance = null;
 
-    constructor() {
-        this.#squares = Array.from(document.querySelectorAll('.grid div')) // 1D array from grid elements
-        this.#bounds = new Rect(0, 0, 10, 20); // REVISIT: find a central place to retrieve the grid dimension
+    // selector is in the form '.grid div'
+    constructor(selector, bounds) {
+        this.#squares = Array.from(document.querySelectorAll(selector)) // 1D array from grid elements
+        this.#bounds = bounds
     }
 
-    // Should only be one GridDisplay instance
-    static instance() {
-        if (!GridDisplay.#theInstance) {
-            GridDisplay.#theInstance = new GridDisplay();
-        }
-        return GridDisplay.#theInstance;
-    }
+    // #squares is a 1D array; convert 2D coordinates to a 1D index.
+    #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
 
-        // #squares is a 1D array; convert 2D coordinates to a 1D index.
-        #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
-
-        width() { return this.#bounds.width(); }
-        height() { return this.#bounds.height(); }
-        bounds() { return this.#bounds.clone(); }
+    width() { return this.#bounds.width(); }
+    height() { return this.#bounds.height(); }
+    bounds() { return this.#bounds.clone(); }
     
-        // color can be a name or hex string
-        setColorAt(x, y, color) { this.#squares[this.#index(x,y)].style.backgroundColor = color; }
+    // color can be a name or hex string
+    setColorAt(x, y, color) { 
+        // for testing:
+        // const idx = this.#index(x, y);
+        //     if (!this.#squares[idx]) {
+        //         console.error("Bad GridDisplay index?", { x, y, idx, len: this.#squares.length, bounds: this.#bounds });
+        //         return; // prevent crash while debugging
+        //     }
+        //     this.#squares[idx].style.backgroundColor = color;
+        this.#squares[this.#index(x,y)].style.backgroundColor = color; 
+    
+    }
 
-        // Display the given image within the given area. The area rect can be used to
-        // limit the extent of the update (versus always updating the entire board).
-        // image is 8-bit with color index values.
-        displayImage(image, area) {
-            const workArea = this.#bounds.intersection(image.bounds()).intersection(area);
-            if (workArea.empty()) return;
-            for (let y = workArea.top; y < workArea.bottom; ++y) {
-                for (let x = workArea.left; x < workArea.right; ++x) {
-                    const colorIndex = image.valueAt(x, y);
-                    if (colorIndex != CellColorIndex.TRANSPARENT) {
-                        this.setColorAt(x, y, CellColorTable[image.valueAt(x, y)]);
-                    } else {
-                        this.setColorAt(x, y, "#404040"); // dark gray for now
-                    }
+    // Display the given image within the given area. The area rect can be used to
+    // limit the extent of the update (versus always updating the entire board).
+    // image is 8-bit with color index values.
+    displayImage(image, area) {
+        const workArea = this.#bounds.intersection(image.bounds()).intersection(area);
+        if (workArea.empty()) return;
+        for (let y = workArea.top; y < workArea.bottom; ++y) {
+            for (let x = workArea.left; x < workArea.right; ++x) {
+                const colorIndex = image.valueAt(x, y);
+                if (colorIndex != CellColorIndex.TRANSPARENT) {
+                    this.setColorAt(x, y, CellColorTable[image.valueAt(x, y)]);
+                } else {
+                    this.setColorAt(x, y, "#404040"); // dark gray for now
                 }
             }
         }
+    }
 
 }
 
 //-------------------------------------------------------------------------------------------------
+
+// BoardDisplay is for displaying the game board composite in the browser window
+class BoardDisplay {
+    static #theInstance = null;
+
+    // we intend to only have one BoardDisplay instance
+    static instance() {
+        if (!BoardDisplay.#theInstance) {
+            BoardDisplay.#theInstance = new GridDisplay('.grid div', new Rect(0, 0, 10, 20));
+        }
+        return BoardDisplay.#theInstance;
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// StackKeyDisplay is for displaying the key image for the current pieces stack.
+// The key image is the top five rows of the pieces stack with holes and overhangs filled in.
+
+class StackKeyDisplay {
+    static #theInstance = null;
+
+    // We intend to have only one StackKeyDisplay instance
+    static instance() {
+        if (!StackKeyDisplay.#theInstance) {
+            StackKeyDisplay.#theInstance = new GridDisplay('.stackKey div', new Rect(0, 0, 10, 5));
+        }
+        return StackKeyDisplay.#theInstance;
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
 
 // updates the invalid area
 function updateDisplay() {
@@ -879,10 +1024,10 @@ function updateDisplay() {
 }
 
 function offsetBoardPiece(x, y) {
-    // REVISIT: consider calling a GameState function for offset and rotate instead of calling
-    // the GameBoard directly. The updateDisplay() call is still probably appropriate here
-    // (want to minimize "view" considerations down in the GameState and GameBoard "model").
-    if (GameBoard.instance().offsetPiece(x, y)) updateDisplay();
+    // Manually offsetting piece downward scores points
+    // call GameState to handle this since GameState handles scoring
+    // GameState handles the display update
+    GameState.instance().offsetPiece(x, y)
 }
 
 function rotateBoardPieceCW() {

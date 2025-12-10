@@ -522,6 +522,89 @@ class GameBoard {
     
     }
 
+    // Will need to use this for the "available" part of getQ(), aka the values of the state key
+    // I think I can use the stackTopImage for board?
+    enumeratePlacements(piece) {
+        const placements = [];
+        const rotations = this.getUniqueRotations(piece);
+
+        // iterate through each rotation position
+        for (let r = 0; r < rotations.length; r++) {
+            const rotated = rotations[r];
+
+            // iterate through each horizontal position in the board bounds (with cushion)
+            // -2 and +2 here allow for pieces like "I" to be at the edge of board when rotated
+            // but I'm not sure if that's the best way to do this or if the value of 2 is correct
+            for (let x = -2; x < this.bounds().width() + 2; x++) {
+                
+                let testPiece = rotated.shallowClone();
+                testPiece.moveTo(x, testPiece.bounds().top);
+
+                // skip if out of bounds
+                if (!this.isValidPosition(testPiece)) continue; 
+
+                // this is the same logic as findGhostPosition(piece)
+                // is there a better way to just access the findGhostPosition logic?
+                while (this.isValidPosition(testPiece)) {
+                    testPiece.offset(0, 1);
+                }
+                testPiece.offset(0, -1); // back tracking by 1 here after an inval pos is found
+
+                // example placements entry: placements = [{ rotation: 0, x: 3, piece: <clone> }, ...]
+                // I think having rotation and x position will be good if I want to look at the data later
+                // ...but might only be necessary to have the testPiece clone itself.
+                // The testPiece can be used later to place piece when action is chosen
+                if (this.isValidPosition(testPiece)) {
+                    placements.push({ rotation: r, x, piece: testPiece });
+                }
+            }
+        }
+
+        console.log("placements for piece: ", { rotations: rotations.length, placements: placements.length });
+
+        return placements;
+    }
+
+    // returns an array of IndexedImage rotations 
+    getUniqueRotations(piece) {
+        const rotations = [];
+        const uniqueRotations = new Set(); // used to find duplicates (with a square or bar piece for example)
+
+        let current = piece.shallowClone();
+        // loop through the four possible rotations (although some shapes will have less)
+        for (let i = 0; i < 4; i++) {
+            const signature = this.stringifyRotation(current);
+            if (!uniqueRotations.has(signature)) {
+                uniqueRotations.add(signature); // add signature to the set if not present already
+                rotations.push(current); // add current rotated piece to rotations
+            }
+            current = rotateCW(current);
+        }
+        return rotations;
+    }
+
+    // returns a string signature for the piece and its rotation
+    stringifyRotation(rotatedPiece) {
+        const values = []; // for ordering of the pixel values
+        const bounds = rotatedPiece.bounds();
+
+        for (let y = bounds.top; y < bounds.bottom; ++y) {
+            for (let x = bounds.left; x < bounds.right; ++x) {
+                values.push(rotatedPiece.valueAt(x, y));
+            }
+        }
+
+        // example rotation signature for "T" piece in upright T position:
+        // 3x2:1,1,1,0,1,0 with 1,1,1 being the top row and 0,1,0 being the bottom row
+        // in this example the number 1 could be another number depending on color
+        const sig = `${bounds.width()}x${bounds.height()}:${values.join(",")}`;
+
+        return sig
+    }
+
+
+
+
     // resets the board to begin a new game
     resetBoard() {
         this.#stackImage.fill(CellColorIndex.TRANSPARENT);
@@ -1121,34 +1204,51 @@ class QLearning {
         this.epsilon = epsilon; // EXPLORATION RATE, probability a random action (exploration) will be taken
     }
 
-    // returns the qTable entry for the given state
+    // returns the qTable values for the given state
     // available: list of all legal placements for the active piece. comes from enumeratePlacements
-    getQ(state, available) {
+    getQ(stateKey, available) {
+        const actionCount = available.length;
         // if current state does not exists in qTable, created an entry with values of 0
-        if (!this.qTable.has(state)) {
+        if (!this.qTable.has(stateKey)) {
             // creates an array sized to the number of possible placements. Initialized to zeros
-            this.qTable.set(state, new Float32Array(available.length)); 
+            this.qTable.set(stateKey, new Float32Array(actionCount)); 
         }
-        return this.qTable.get(state);
-        
+        return this.qTable.get(stateKey);
     }
 
-    getAction(state, available){
+    getAction(stateKey, available) {
+        const q = this.getQ(stateKey, available);
         // if less than epsilon, explore. else, exploit
         if (Math.random() < this.epsilon) {
             // ~~ is a double bitwise NOT operator, which is apparently faster than math.floor()
             return available[~~(Math.random() * available.length)]; // returns a random action
         }
-        const q = this.getQ(state, available);
-        return available.reduce((best, a) => q[a] > q[best] ? a : best, available[0]) // returns best known move
+        return available.reduce((best, a) => q[a] > q[best] ? a : best, available[0]); // returns best known move
     }
 
     // This is that q-learning function:
+    // r is the reqard which we will define in a separate function? The difference between the health of the states?
     // Q(s, a) ← Q(s, a) + α [r + γ max(a') Q(s', a') − Q(s, a)]
-    update(s, a, r, s2, available2) {
-        const q = this.getQ(s);
-        const maxQ2 = available2.length ? Math.max(...available2.map(a_prime => this.getQ(s2)[a_prime])) : 0;
-        q[a] += this.lr * (r + this.gamma * maxQ2 - q[a]); // updating the q-value for this action
+    update(s, action, reward, s2, available2) {
+        const q = this.qTable.get(s) // get the current state's actions
+        if (!q) return; // just in case
+
+        const q2 = this.qTable.get(s2) // get the next state's actions
+        const maxQ2 = (q2 && available2.length) ? Math.max(...available2.map(a_prime => q2[a_prime])) : 0;
+        
+        q[action] += this.lr * (reward + this.gamma * maxQ2 - q[action]); // updating the q-value for this action
+    }
+
+    // TODO: complete getReward() and getBoardHealth()
+    // decide whether to consider the whole board for things like aggregate height, holes, bumpiness
+    getReward(stateKey, nextStateKey) {
+   
+    }
+
+    // consider: a hole may be detected in the bottom row of the top stack, but if it has
+    // an empty cell below it then it would not be considered a hole in the overall grid.
+    getBoardHealth(stateKey) {
+
     }
 
     // ----------- HELPER FUNCTIONS -----------------------------
@@ -1159,13 +1259,13 @@ class QLearning {
     }
 
     reset() {
-        this.q.clear();
+        this.qTable.clear();
         this.epsilon = 0.1;
     }
 
     save() {
         const data = {
-            q: Array.from(this.q.entries()),
+            qTable: Array.from(this.qTable.entries()),
             lr: this.lr,
             gamma: this.gamma,
             epsilon: this.epsilon
@@ -1182,7 +1282,7 @@ class QLearning {
 
         try {
             const data = JSON.parse(saved);
-            this.q = new Map(data.q); // creates new map from existing data array in save()
+            this.qTable = new Map(data.qTable); // creates new map from existing data array in save()
             this.lr = data.lr;
             this.gamma = data.gamma;
             this.epsilon = data.epsilon;
@@ -1198,48 +1298,10 @@ class QLearning {
     }
 }
 
-function enumeratePlacements(board, piece) {
-    const placements = [];
-    const rotations = getUniqueRotations(piece);
 
-    // iterate through each rotation position
-    for (let r = 0; r < rotations.length; r++) {
-        const rotated = rotations[r];
-
-        // iterate through each horizontal position
-        // -2 and +2 here allow for pieces like "I" to be at the edge of board when rotated
-        // but I'm not sure if that's the best way to do this or if the value of 2 is correct
-        for (let x = -2; x < board.width() + 2; x++) {
-            let testPiece = rotated.shallowClone();
-            testPiece.moveTo(x, testPiece.bounds().top);
-
-            // skip if out of bounds
-            if (!board.isValidPosition(testPiece)) continue; 
-
-            // this is the same logic as findGhostPosition(piece)
-            // is there a better way to just access the findGhostPosition logic?
-            while (board.isValidPosition(testPiece)) {
-                testPiece.offset(0, 1);
-            }
-            testPiece.offset(0, -1);
-
-            // example placements entry: placements = [{ rotation: 0, x: 3, piece: <clone> }, ...]
-            // I think having rotation and x position will be good if I want to look at the data later
-            // ...but might only be necessary to have the testPiece clone itself.
-            // The testPiece can be used later to place piece when action is chosen
-            if (board.isValidPosition(testPiece)) {
-                placements.push({ rotation: r, x, piece: testPiece });
-            }
-        }
-    }
-    return placements;
-}
 
 // TODO: -----------------------------------------
 // add function getUniqueRotations()
-// define state index (64-bit)
-// define retrieval of top 5 rows of board. Is there a place in code should I access this from?
-// and probably lots more :)
 
 // NOTES TO SELF:
 // the board is called in enumeratePlacements(). Should this be the top 5 rows, or the whole board?

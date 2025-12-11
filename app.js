@@ -903,6 +903,7 @@ class GameState {
         this.#descentInfo = { msStepTime: 0, msRate: 1000 };
         this.#collapseStepTime = 0;
         this.#timer = null;
+        this.#score = 0;
     }
 
     // Should be only one GameState instance
@@ -1006,6 +1007,7 @@ class GameState {
         const msNow = Date.now();
         if (msNow - this.#collapseStepTime < 1000) return;
 
+        this.#score += 100 * GameBoard.instance().completedRowCount();
         GameBoard.instance().collapseCompletedRows();
         this.#startDescent();
         updateDisplay();
@@ -1104,6 +1106,7 @@ class StackKeyDisplay {
 // updates the invalid area
 function updateDisplay() {
     GameBoard.instance().updateDisplay();
+    updateScoreDisplay();
 }
 
 function offsetBoardPiece(x, y) {
@@ -1123,8 +1126,7 @@ function rotateBoardPieceCCW() {
 
 //-------------------------------------------------------------------------------------------------
 
-//REVISIT: should we allow for moving the piece up during descent?
-// Esp considering that it would allow the player to delay the descent of the next piece
+
 function handleKeyDown(event) {
     if (event.shiftKey) {
         switch(event.code) {
@@ -1138,7 +1140,6 @@ function handleKeyDown(event) {
             case 'ArrowLeft':   offsetBoardPiece(-1, 0);   break;
             case 'ArrowRight':  offsetBoardPiece(1, 0);    break;
             case 'ArrowDown':   offsetBoardPiece(0, 1);    break;
-            case 'ArrowUp':     offsetBoardPiece(0, -1);   break; // see above REVISIT
        }
     }
 }
@@ -1151,6 +1152,11 @@ function adjustStartButton() {
     else if (GameState.instance().paused()) startButton.value = "Resume";
     else if (GameState.instance().gameOver()) startButton.value = "Play Again";
     else startButton.value = "Play";
+}
+
+function updateScoreDisplay() {
+    const scoreElem = document.querySelector('#score');
+    scoreElem.textContent = GameState.instance().score().toString();
 }
 
 function handleStartButton() {

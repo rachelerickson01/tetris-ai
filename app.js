@@ -205,9 +205,10 @@ class IndexedImage {
         }
     }
 
-
-    // ADD COMMENTS
+    // takes a rect from source image and copies it into this image
     copyRect(srcRect, srcImage, dstX, dstY, mergeMode = false) {
+        // Translates a shallow copy of the srcImage and srcRect
+        // so that the source image and this image are in the same coordinate space
         const translation = new Point(dstX - srcRect.left, dstY - srcRect.top);
         const transSrcImg = srcImage.shallowClone();
         const transSrcRect = srcRect.clone();
@@ -224,6 +225,17 @@ class IndexedImage {
                     this.setValueAt(x, y, value);
             }
         }
+    }
+
+    // returns a new image that is a sub rect of this image
+    // returns null if rect does not itersect with this image
+    subImage(rect) {
+        const srcRect = this.#bounds.intersection(rect); // find intersect of rect and this
+        if (srcRect.empty()) return null;
+        var image = new IndexedImage(srcRect.width(), srcRect.height()); // new image
+        image.moveTo(srcRect.left, srcRect.top) // position to location of source rect
+        image.copyRect(srcRect, this, srcRect.left, srcRect.top);
+        return image;
     }
 
     // merges values from image at the intersection of this and r
@@ -311,6 +323,29 @@ function transposeImage(srcImg, transposition) {
     const offset = srcImg.bounds().center().round().sub(dstImg.bounds().center().round());
     dstImg.offset(offset.x, offset.y);
     return dstImg;
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// fills holes and fills in the overhang "shadow" for the purpose of qTable keys redundancy
+function fillHolesAndOverhangs(image) {
+    const bounds = image.bounds();
+    // for each column, scan fom top down
+    // for any non-transparent pixel, fill in any transparent pixels below
+    for (x = bounds.left; x < bounds.right; ++x) {
+        var filling = false;
+        for (y = bounds.top; y < bounds.bottom; ++y) {
+            if (filling) {
+                if (image.valueAt(x, y) == CellColorIndex.TRANSPARENT) {
+                    // fill color is arbitrary, just chose white to distinguish from shape colors
+                    image.setValueAt(x, y, CellColorIndex.WHITE);
+                }
+            }
+            else {
+                filling = (image.valueAt(x, y) != CellColorIndex.TRANSPARENT);
+            }
+        }
+    }
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -411,10 +446,13 @@ function makeSquareImage(colorValue) {
 }
 
 // creates a random piece of random color index. Could later consider picking from a set without replacement 
+// returns an object having the piece and its shape index number
 function makeRandomPiece() {
     const makers = [makeBarImage, makeLImage, makeJImage, makeSImage, makeZImage, makeTImage, makeSquareImage];
-    const i = randomInt(0, makers.length - 1);
-    return makers[i](randomPieceColorIndex());
+    const result = {}
+    result.index = randomInt(0, makers.length - 1);
+    result.piece = makers[result.index](randomPieceColorIndex());
+    return result;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -456,7 +494,8 @@ class GameBoard {
     bounds() { return this.#compositeImage.bounds(); }
 
     startPiece() {
-        const piece = makeRandomPiece();
+        const randomPiece = makeRandomPiece();
+        const piece = randomPiece.piece // returns the piece component of the object
         // drop new piece at the top middle of the game board with its bottom row visible
         const visBounds = piece.visibleBounds();
         const left = Math.round((this.bounds().width() - visBounds.width()) / 2); 
@@ -467,8 +506,104 @@ class GameBoard {
 
         this.#activePiece = piece;
         this.invalComposite(piece.visibleBounds());
+        
+        // test code
+        // prints in hex and binary
+        const stackKey = this.stackTopKey();
+        console.log("startPiece() - stack key: " + stackKey.toString(16) + ", " + stackKey.toString(2))
+
+        const pieceKey = randomPiece.index * (2 ** 50); // shift to the upper range to prevent overlap?
+        console.log("startPiece() - piece key: " + pieceKey.toString(16) + ", " + pieceKey.toString(2));
+
+        const stateKey = stackKey + pieceKey;
+        console.log("startPiece() - state key: " + stateKey.toString(16) + ", " + stateKey.toString(2));
+
         return true;
+    
     }
+
+    // Will need to use this for the "available" part of getQ(), aka the values of the state key
+    // I think I can use the stackTopImage for board?
+    enumeratePlacements(piece) {
+        const placements = [];
+        const rotations = this.getUniqueRotations(piece);
+
+        // iterate through each rotation position
+        for (let r = 0; r < rotations.length; r++) {
+            const rotated = rotations[r];
+
+            // iterate through each horizontal position in the board bounds (with cushion)
+            // -2 and +2 here allow for pieces like "I" to be at the edge of board when rotated
+            // but I'm not sure if that's the best way to do this or if the value of 2 is correct
+            for (let x = -2; x < this.bounds().width() + 2; x++) {
+                
+                let testPiece = rotated.shallowClone();
+                testPiece.moveTo(x, testPiece.bounds().top);
+
+                // skip if out of bounds
+                if (!this.isValidPosition(testPiece)) continue; 
+
+                // this is the same logic as findGhostPosition(piece)
+                // is there a better way to just access the findGhostPosition logic?
+                while (this.isValidPosition(testPiece)) {
+                    testPiece.offset(0, 1);
+                }
+                testPiece.offset(0, -1); // back tracking by 1 here after an inval pos is found
+
+                // example placements entry: placements = [{ rotation: 0, x: 3, piece: <clone> }, ...]
+                // I think having rotation and x position will be good if I want to look at the data later
+                // ...but might only be necessary to have the testPiece clone itself.
+                // The testPiece can be used later to place piece when action is chosen
+                if (this.isValidPosition(testPiece)) {
+                    placements.push({ rotation: r, x, piece: testPiece });
+                }
+            }
+        }
+
+        console.log("placements for piece: ", { rotations: rotations.length, placements: placements.length });
+
+        return placements;
+    }
+
+    // returns an array of IndexedImage rotations 
+    getUniqueRotations(piece) {
+        const rotations = [];
+        const uniqueRotations = new Set(); // used to find duplicates (with a square or bar piece for example)
+
+        let current = piece.shallowClone();
+        // loop through the four possible rotations (although some shapes will have less)
+        for (let i = 0; i < 4; i++) {
+            const signature = this.stringifyRotation(current);
+            if (!uniqueRotations.has(signature)) {
+                uniqueRotations.add(signature); // add signature to the set if not present already
+                rotations.push(current); // add current rotated piece to rotations
+            }
+            current = rotateCW(current);
+        }
+        return rotations;
+    }
+
+    // returns a string signature for the piece and its rotation
+    stringifyRotation(rotatedPiece) {
+        const values = []; // for ordering of the pixel values
+        const bounds = rotatedPiece.bounds();
+
+        for (let y = bounds.top; y < bounds.bottom; ++y) {
+            for (let x = bounds.left; x < bounds.right; ++x) {
+                values.push(rotatedPiece.valueAt(x, y));
+            }
+        }
+
+        // example rotation signature for "T" piece in upright T position:
+        // 3x2:1,1,1,0,1,0 with 1,1,1 being the top row and 0,1,0 being the bottom row
+        // in this example the number 1 could be another number depending on color
+        const sig = `${bounds.width()}x${bounds.height()}:${values.join(",")}`;
+
+        return sig
+    }
+
+
+
 
     // resets the board to begin a new game
     resetBoard() {
@@ -489,6 +624,11 @@ class GameBoard {
         if (visibleOverlap(piece, this.#stackImage)) return false;
 
         return true;
+    }
+
+    // helper function to call validPosition() later on for qLearning
+    isValidPosition(piece) {
+        return this.#validPosition(piece);
     }
 
     // private function to find where to place the ghost piece
@@ -646,6 +786,8 @@ class GameBoard {
 
     hasCompletedRows() { return (this.#completedRowSet.size > 0); }
 
+    completedRowCount() { return this.#completedRowSet.size; }
+
     invalComposite(r) {
         if (r) {
             this.#invalRect = this.#invalRect.union(r).intersection(this.bounds());
@@ -689,10 +831,57 @@ class GameBoard {
         const area = this.#invalRect;
         if (!area.empty()) {
             this.updateComposite();
-            GridDisplay.instance().displayImage(this.#compositeImage, area);
+            BoardDisplay.instance().displayImage(this.#compositeImage, area);
         }
     }
-    
+
+    // returns an image from the top five rows of the stack image
+    stackTopImage() {
+        var stackTopBounds = this.#stackImage.bounds();
+        const visBounds = this.#stackImage.visibleBounds();
+        if (visBounds.empty()) {
+            stackTopBounds.top = stackTopBounds.bottom - 5;
+        } else {
+            // assume that visBounds extends to bottom of the stack image
+            if (visBounds.top + 5 > stackTopBounds.bottom) {
+                stackTopBounds.top = stackTopBounds.bottom - 5;
+            } else {
+                stackTopBounds.top = visBounds.top;
+                stackTopBounds.bottom = visBounds.top + 5;
+            }      
+        }
+        return this.#stackImage.subImage(stackTopBounds);
+    }
+
+    stackTopKey() {
+        var stackTopImage = this.stackTopImage();
+        fillHolesAndOverhangs(stackTopImage);
+        stackTopImage.moveTo(0, 0);
+        const stackTopBounds = stackTopImage.bounds();
+        StackKeyDisplay.instance().displayImage(stackTopImage, stackTopBounds);
+
+        var keyNum = 0;
+        var bitIndex = 0;
+
+        // scan the cells from top to bottom, left to right
+        // top left cell corresponds to lowest bit in the 50-bit number
+        // bottom right corresponds to highest bit in the 50-bit number
+        // this arrangement allows for the key to be consistently calculated
+
+        for (var y = stackTopBounds.top; y < stackTopBounds.bottom; ++y) {
+            for (var x = stackTopBounds.left; x < stackTopBounds.right; ++x) {
+                const pixelValue = this.#stackImage.valueAt(x, y);
+                if (pixelValue!= CellColorIndex.TRANSPARENT) {
+                    // need 50 bits so can't use typical bitwise operations (would convert to 32-bit)
+                    const bitMask = 2 ** bitIndex;
+                    keyNum += bitMask
+                }
+                ++bitIndex;
+            }
+        }
+        return keyNum
+    }
+
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -704,6 +893,7 @@ class GameState {
     #descentInfo;
     #collapseStepTime;
     #timer;
+    #score
     static #theInstance = null;
 
     constructor() {
@@ -713,6 +903,7 @@ class GameState {
         this.#descentInfo = { msStepTime: 0, msRate: 1000 };
         this.#collapseStepTime = 0;
         this.#timer = null;
+        this.#score = 0;
     }
 
     // Should be only one GameState instance
@@ -727,6 +918,7 @@ class GameState {
     gameOver() { return this.#phase == this.#phases.END; }
     paused() { return this.#phase == this.#phases.PAUSE; }
     playing() { return this.#phase == this.#phases.DESCENT || this.#phase == this.#phases.COLLAPSE; }
+    score() { return this.#score;}
 
     startButtonClicked() {
         if (this.playing()) this.pause();
@@ -769,6 +961,13 @@ class GameState {
         }
     }
 
+    offsetPiece(x, y) {
+        if (GameBoard.instance().offsetPiece(x, y)) {
+            if (y > 0) this.#score++; // score increases by 1 for each manual descent
+            updateDisplay();
+        }
+    }
+
     handleTimer() {
         if (this.#phase == this.#phases.DESCENT) this.#stepDescent();
         else if (this.#phase == this.#phases.COLLAPSE) this.#stepCollapse();
@@ -808,6 +1007,7 @@ class GameState {
         const msNow = Date.now();
         if (msNow - this.#collapseStepTime < 1000) return;
 
+        this.#score += 100 * GameBoard.instance().completedRowCount();
         GameBoard.instance().collapseCompletedRows();
         this.#startDescent();
         updateDisplay();
@@ -821,63 +1021,99 @@ class GameState {
 class GridDisplay {
     #bounds;
     #squares;
-    static #theInstance = null;
 
-    constructor() {
-        this.#squares = Array.from(document.querySelectorAll('.grid div')) // 1D array from grid elements
-        this.#bounds = new Rect(0, 0, 10, 20); // REVISIT: find a central place to retrieve the grid dimension
+    // selector is in the form '.grid div'
+    constructor(selector, bounds) {
+        this.#squares = Array.from(document.querySelectorAll(selector)) // 1D array from grid elements
+        this.#bounds = bounds
     }
 
-    // Should only be one GridDisplay instance
-    static instance() {
-        if (!GridDisplay.#theInstance) {
-            GridDisplay.#theInstance = new GridDisplay();
-        }
-        return GridDisplay.#theInstance;
-    }
+    // #squares is a 1D array; convert 2D coordinates to a 1D index.
+    #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
 
-        // #squares is a 1D array; convert 2D coordinates to a 1D index.
-        #index(x, y) { return (y - this.#bounds.top) * this.#bounds.width() + (x - this.#bounds.left); }
-
-        width() { return this.#bounds.width(); }
-        height() { return this.#bounds.height(); }
-        bounds() { return this.#bounds.clone(); }
+    width() { return this.#bounds.width(); }
+    height() { return this.#bounds.height(); }
+    bounds() { return this.#bounds.clone(); }
     
-        // color can be a name or hex string
-        setColorAt(x, y, color) { this.#squares[this.#index(x,y)].style.backgroundColor = color; }
+    // color can be a name or hex string
+    setColorAt(x, y, color) { 
+        // for testing:
+        // const idx = this.#index(x, y);
+        //     if (!this.#squares[idx]) {
+        //         console.error("Bad GridDisplay index?", { x, y, idx, len: this.#squares.length, bounds: this.#bounds });
+        //         return; // prevent crash while debugging
+        //     }
+        //     this.#squares[idx].style.backgroundColor = color;
+        this.#squares[this.#index(x,y)].style.backgroundColor = color; 
+    
+    }
 
-        // Display the given image within the given area. The area rect can be used to
-        // limit the extent of the update (versus always updating the entire board).
-        // image is 8-bit with color index values.
-        displayImage(image, area) {
-            const workArea = this.#bounds.intersection(image.bounds()).intersection(area);
-            if (workArea.empty()) return;
-            for (let y = workArea.top; y < workArea.bottom; ++y) {
-                for (let x = workArea.left; x < workArea.right; ++x) {
-                    const colorIndex = image.valueAt(x, y);
-                    if (colorIndex != CellColorIndex.TRANSPARENT) {
-                        this.setColorAt(x, y, CellColorTable[image.valueAt(x, y)]);
-                    } else {
-                        this.setColorAt(x, y, "#404040"); // dark gray for now
-                    }
+    // Display the given image within the given area. The area rect can be used to
+    // limit the extent of the update (versus always updating the entire board).
+    // image is 8-bit with color index values.
+    displayImage(image, area) {
+        const workArea = this.#bounds.intersection(image.bounds()).intersection(area);
+        if (workArea.empty()) return;
+        for (let y = workArea.top; y < workArea.bottom; ++y) {
+            for (let x = workArea.left; x < workArea.right; ++x) {
+                const colorIndex = image.valueAt(x, y);
+                if (colorIndex != CellColorIndex.TRANSPARENT) {
+                    this.setColorAt(x, y, CellColorTable[image.valueAt(x, y)]);
+                } else {
+                    this.setColorAt(x, y, "#404040"); // dark gray for now
                 }
             }
         }
+    }
 
 }
 
 //-------------------------------------------------------------------------------------------------
 
+// BoardDisplay is for displaying the game board composite in the browser window
+class BoardDisplay {
+    static #theInstance = null;
+
+    // we intend to only have one BoardDisplay instance
+    static instance() {
+        if (!BoardDisplay.#theInstance) {
+            BoardDisplay.#theInstance = new GridDisplay('.grid div', new Rect(0, 0, 10, 20));
+        }
+        return BoardDisplay.#theInstance;
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+// StackKeyDisplay is for displaying the key image for the current pieces stack.
+// The key image is the top five rows of the pieces stack with holes and overhangs filled in.
+
+class StackKeyDisplay {
+    static #theInstance = null;
+
+    // We intend to have only one StackKeyDisplay instance
+    static instance() {
+        if (!StackKeyDisplay.#theInstance) {
+            StackKeyDisplay.#theInstance = new GridDisplay('.stackKey div', new Rect(0, 0, 10, 5));
+        }
+        return StackKeyDisplay.#theInstance;
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+
+
 // updates the invalid area
 function updateDisplay() {
     GameBoard.instance().updateDisplay();
+    updateScoreDisplay();
 }
 
 function offsetBoardPiece(x, y) {
-    // REVISIT: consider calling a GameState function for offset and rotate instead of calling
-    // the GameBoard directly. The updateDisplay() call is still probably appropriate here
-    // (want to minimize "view" considerations down in the GameState and GameBoard "model").
-    if (GameBoard.instance().offsetPiece(x, y)) updateDisplay();
+    // Manually offsetting piece downward scores points
+    // call GameState to handle this since GameState handles scoring
+    // GameState handles the display update
+    GameState.instance().offsetPiece(x, y)
 }
 
 function rotateBoardPieceCW() {
@@ -890,8 +1126,7 @@ function rotateBoardPieceCCW() {
 
 //-------------------------------------------------------------------------------------------------
 
-//REVISIT: should we allow for moving the piece up during descent?
-// Esp considering that it would allow the player to delay the descent of the next piece
+
 function handleKeyDown(event) {
     if (event.shiftKey) {
         switch(event.code) {
@@ -905,7 +1140,6 @@ function handleKeyDown(event) {
             case 'ArrowLeft':   offsetBoardPiece(-1, 0);   break;
             case 'ArrowRight':  offsetBoardPiece(1, 0);    break;
             case 'ArrowDown':   offsetBoardPiece(0, 1);    break;
-            case 'ArrowUp':     offsetBoardPiece(0, -1);   break; // see above REVISIT
        }
     }
 }
@@ -918,6 +1152,11 @@ function adjustStartButton() {
     else if (GameState.instance().paused()) startButton.value = "Resume";
     else if (GameState.instance().gameOver()) startButton.value = "Play Again";
     else startButton.value = "Play";
+}
+
+function updateScoreDisplay() {
+    const scoreElem = document.querySelector('#score');
+    scoreElem.textContent = GameState.instance().score().toString();
 }
 
 function handleStartButton() {
@@ -952,3 +1191,125 @@ function testIndexedImage() {
 function tests() {
     testIndexedImage();
 }
+
+
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+
+// this is the Q-learning agent
+class QLearning {
+
+    constructor(lr = 0.1, gamma = 0.9, epsilon = 0.1) {
+        // this is our q table. stores values: { state ==> [q_action_0, q_action_1, ...]}
+        this.qTable = new Map(); 
+        this.lr = lr; // ALPHA, the learning rate
+        this.gamma = gamma; // DISCOUNT FACTOR, how much to value future rewards
+        this.epsilon = epsilon; // EXPLORATION RATE, probability a random action (exploration) will be taken
+    }
+
+    // returns the qTable values for the given state
+    // available: list of all legal placements for the active piece. comes from enumeratePlacements
+    getQ(stateKey, available) {
+        const actionCount = available.length;
+        // if current state does not exists in qTable, created an entry with values of 0
+        if (!this.qTable.has(stateKey)) {
+            // creates an array sized to the number of possible placements. Initialized to zeros
+            this.qTable.set(stateKey, new Float32Array(actionCount)); 
+        }
+        return this.qTable.get(stateKey);
+    }
+
+    getAction(stateKey, available) {
+        const q = this.getQ(stateKey, available);
+        // if less than epsilon, explore. else, exploit
+        if (Math.random() < this.epsilon) {
+            // ~~ is a double bitwise NOT operator, which is apparently faster than math.floor()
+            return available[~~(Math.random() * available.length)]; // returns a random action
+        }
+        return available.reduce((best, a) => q[a] > q[best] ? a : best, available[0]); // returns best known move
+    }
+
+    // This is that q-learning function:
+    // r is the reqard which we will define in a separate function? The difference between the health of the states?
+    // Q(s, a) ← Q(s, a) + α [r + γ max(a') Q(s', a') − Q(s, a)]
+    update(s, action, reward, s2, available2) {
+        const q = this.qTable.get(s) // get the current state's actions
+        if (!q) return; // just in case
+
+        const q2 = this.qTable.get(s2) // get the next state's actions
+        const maxQ2 = (q2 && available2.length) ? Math.max(...available2.map(a_prime => q2[a_prime])) : 0;
+        
+        q[action] += this.lr * (reward + this.gamma * maxQ2 - q[action]); // updating the q-value for this action
+    }
+
+    // TODO: complete getReward() and getBoardHealth()
+    // decide whether to consider the whole board for things like aggregate height, holes, bumpiness
+    getReward(stateKey, nextStateKey) {
+   
+    }
+
+    // consider: a hole may be detected in the bottom row of the top stack, but if it has
+    // an empty cell below it then it would not be considered a hole in the overall grid.
+    getBoardHealth(stateKey) {
+
+    }
+
+    // ----------- HELPER FUNCTIONS -----------------------------
+
+    decay() {
+        const decayValue = 0.995; // value could be adjusted later
+        this.epsilon = Math.max(0.01, this.epsilon * decayValue);
+    }
+
+    reset() {
+        this.qTable.clear();
+        this.epsilon = 0.1;
+    }
+
+    save() {
+        const data = {
+            qTable: Array.from(this.qTable.entries()),
+            lr: this.lr,
+            gamma: this.gamma,
+            epsilon: this.epsilon
+        };
+        // This will let me track the contents of the qTable entries after a session
+        // I think I can use console.log() to read this too
+        // also will allow the agent to pick up where it left off
+        localStorage.setItem('tetris_qLearning_ai', JSON.stringify(data));
+    }
+
+    load() {
+        const saved = localStorage.getItem('tetris_qLearning_ai');
+        if (!saved) return false;
+
+        try {
+            const data = JSON.parse(saved);
+            this.qTable = new Map(data.qTable); // creates new map from existing data array in save()
+            this.lr = data.lr;
+            this.gamma = data.gamma;
+            this.epsilon = data.epsilon;
+            return true;
+        } catch (e) {
+            console.error("Failed to load AI state: ", e);
+            return false;
+        }
+    }
+
+    clearStorage() {
+        localStorage.removeItem('tetris_qLearning_ai');
+    }
+}
+
+
+
+// TODO: -----------------------------------------
+// add function getUniqueRotations()
+
+// NOTES TO SELF:
+// the board is called in enumeratePlacements(). Should this be the top 5 rows, or the whole board?
+// I would think the top 5 rows should be used for the key, but not necessarily for enumerating placements.
+// It might be unnecessary to have 'available' present in arguments for both getQ() and getAction()

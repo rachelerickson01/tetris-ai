@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.addEventListener("keydown", function(event) { handleKeyDown(event); });
     startButton.onclick = handleStartButton;
 
+    //Invaraint shape info. Need GameBoard availability when calling
+    buildShapeInfos();
+
     tests();
 })
 
@@ -175,6 +178,11 @@ class IndexedImage {
         return clone;
     }
 
+    // deep copy clone, separate from original
+    clone() {
+        return this.subImage(this.bounds());
+    }
+
     // creates IndexedImage from 2d array
     // REVIEW INDEX LOGIC
     static from2DArray(array) {
@@ -284,6 +292,13 @@ class IndexedImage {
         // Should focus on using well-crafted loops for direct memory stores
         this.#visibleBounds = null;
     }
+
+    colorize(colorIndex) {
+        for (let i = 0; i < this.#data.length; ++i) {
+            if (this.#data[i] != CellColorIndex.TRANSPARENT)
+                this.#data[i] = colorIndex;
+        }
+    }
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -342,6 +357,7 @@ function fillHolesAndOverhangs(image) {
                 }
             }
             else {
+                // only start filling once non-transparent pixels are reached in the column
                 filling = (image.valueAt(x, y) != CellColorIndex.TRANSPARENT);
             }
         }
@@ -448,14 +464,51 @@ function makeSquareImage(colorValue) {
 // creates a random piece of random color index. Could later consider picking from a set without replacement 
 // returns an object having the piece and its shape index number
 function makeRandomPiece() {
-    const makers = [makeBarImage, makeLImage, makeJImage, makeSImage, makeZImage, makeTImage, makeSquareImage];
     const result = {}
-    result.index = randomInt(0, makers.length - 1);
-    result.piece = makers[result.index](randomPieceColorIndex());
+    result.index = randomInt(0, ShapeInfos.length - 1);
+    result.piece = ShapeInfos[result.index].makeMasterShapeImage(randomPieceColorIndex());
     return result;
 }
 
 //-------------------------------------------------------------------------------------------------
+
+class ShapePlacement {
+
+    rotation; // 0-3 for 90-degree clockwise increments
+    horzPosition; // 0-9 for lateral board placements
+    shape; // placed shape having rotation and horzPosition
+
+    constructor(r, h, s) {
+        this.rotation = r;
+        this.horzPosition = h;
+        this.shape = s;
+    }
+
+}
+
+class ShapeInfo {
+
+    makeMasterShapeImage; // factory function pointer
+    placements; // array of shapePlacement
+
+    constructor(makeFunc) {
+        if (!makeFunc) throw "ShapeInfo requires make function";
+        this.makeMasterShapeImage = makeFunc;
+        this.placements = GameBoard.instance().enumeratePlacements(this.makeMasterShapeImage(randomPieceColorIndex()));
+    }
+
+}
+
+const ShapeInfos = [];
+
+// Call once at startup.
+// Valid placements for all shapes are based on empty board
+function buildShapeInfos() {
+    if (ShapeInfos.length) return;
+    const makers = [makeBarImage, makeLImage, makeJImage, makeSImage, makeZImage, makeTImage,
+makeSquareImage];
+    makers.forEach((m) => ShapeInfos.push(new ShapeInfo(m)));
+}
 
 //------------------ GAME BOARD ------------------------------
 
@@ -464,6 +517,7 @@ function makeRandomPiece() {
 class GameBoard {
     #compositeImage; // combination of placed pieces and active piece
     #stackImage; // placed pieces
+    #activePieceIndex; //ShapeInfo index for descending piece
     #activePiece; // descending piece
     #ghostPiece // ghost piece to mirror active piece
     #invalRect;
@@ -478,6 +532,7 @@ class GameBoard {
         this.#stackImage = new IndexedImage(w, h);
         this.#stackImage.fill(CellColorIndex.TRANSPARENT);
         this.#completedRowSet = new Set();
+        this.#activePieceIndex = -1;
         this.#activePiece = null;
         this.#ghostPiece = null;
     }
@@ -493,6 +548,10 @@ class GameBoard {
 
     bounds() { return this.#compositeImage.bounds(); }
 
+    activePieceIndex() { return this.#activePieceIndex; }
+
+    stateKey() { return this.stackTopKey() + this.activePieceKey(); }
+
     startPiece() {
         const randomPiece = makeRandomPiece();
         const piece = randomPiece.piece // returns the piece component of the object
@@ -504,6 +563,7 @@ class GameBoard {
 
         if (!this.#validPosition(piece)) return false; // caller should end the game
 
+        this.#activePieceIndex = randomPiece.index;
         this.#activePiece = piece;
         this.invalComposite(piece.visibleBounds());
         
@@ -512,7 +572,8 @@ class GameBoard {
         const stackKey = this.stackTopKey();
         console.log("startPiece() - stack key: " + stackKey.toString(16) + ", " + stackKey.toString(2))
 
-        const pieceKey = randomPiece.index * (2 ** 50); // shift to the upper range to prevent overlap?
+        //const pieceKey = randomPiece.index * (2 ** 50); // shift to the upper range to prevent overlap?
+        const pieceKey = this.activePieceKey(); // shift to the upper range to prevent overlap?
         console.log("startPiece() - piece key: " + pieceKey.toString(16) + ", " + pieceKey.toString(2));
 
         const stateKey = stackKey + pieceKey;
@@ -522,8 +583,8 @@ class GameBoard {
     
     }
 
-    // Will need to use this for the "available" part of getQ(), aka the values of the state key
-    // I think I can use the stackTopImage for board?
+    // For a given master shape, find the meaninful orientations that are valid on the board
+    // Intended for startup when the board is empty.
     enumeratePlacements(piece) {
         const placements = [];
         const rotations = this.getUniqueRotations(piece);
@@ -540,22 +601,13 @@ class GameBoard {
                 let testPiece = rotated.shallowClone();
                 testPiece.moveTo(x, testPiece.bounds().top);
 
-                // skip if out of bounds
-                if (!this.isValidPosition(testPiece)) continue; 
-
-                // this is the same logic as findGhostPosition(piece)
-                // is there a better way to just access the findGhostPosition logic?
-                while (this.isValidPosition(testPiece)) {
-                    testPiece.offset(0, 1);
-                }
-                testPiece.offset(0, -1); // back tracking by 1 here after an inval pos is found
 
                 // example placements entry: placements = [{ rotation: 0, x: 3, piece: <clone> }, ...]
                 // I think having rotation and x position will be good if I want to look at the data later
                 // ...but might only be necessary to have the testPiece clone itself.
                 // The testPiece can be used later to place piece when action is chosen
                 if (this.isValidPosition(testPiece)) {
-                    placements.push({ rotation: r, x, piece: testPiece });
+                    placements.push(new ShapePlacement(r, x, testPiece));
                 }
             }
         }
@@ -586,7 +638,7 @@ class GameBoard {
     // returns a string signature for the piece and its rotation
     stringifyRotation(rotatedPiece) {
         const values = []; // for ordering of the pixel values
-        const bounds = rotatedPiece.bounds();
+        const bounds = rotatedPiece.visibleBounds();
 
         for (let y = bounds.top; y < bounds.bottom; ++y) {
             for (let x = bounds.left; x < bounds.right; ++x) {
@@ -602,7 +654,72 @@ class GameBoard {
         return sig
     }
 
+    // Return an object:
+    // allPlacements: array of all possible placements (invariant)
+    // available: array of indices into allPlacements for which the placement 
+    //         is valid relative to the current stack
+    // The object includes allPlacements to ensure data consistency between the
+    //       available indices and the array for which they are intended
+    availablePlacements() {
+        const avail = { allPlacements: [], available: [] };
+        if (this.#activePieceIndex >= 0) {
+            avail.allPlacements = ShapeInfos[this.#activePieceIndex].placements;
+            avail.allPlacements.forEach((p, i) => { if (this.isValidPosition(p.shape))
+                avail.available.push(i); });
+        }
+        return avail;
+    }
 
+    // formula for the fitness function of the board. 
+    // -0.51*height + 0.76*lines - 0.36*holes - 0.18*bumpiness
+    // helper to return metrics for board health features
+
+    getBoardFeatures() {
+        const bounds = this.#stackImage.bounds();
+        const width = bounds.width();
+        const height = bounds.height();
+        const columnHeights = new Array(width).fill(0); // empty array to hold heights
+        let aggHeight = 0;
+        let holes = 0;
+        // let completedLines = 0;
+        let bumpiness = 0;
+
+        // AGGREGATE HEIGHT
+        for (let x = 0; x < width; x++) {
+            for (let y = 0; y < height; y++) {
+                const filled = this.#stackImage.valueAt(x, y) != CellColorIndex.TRANSPARENT;
+                if (filled) {
+                    columnHeights[x] = height - y; // store height of column at its x value
+                    aggHeight = columnHeights[x] + aggHeight;
+                    break;
+                }
+            }
+        }
+
+        // NUMBER OF HOLES
+        // I'm going to consider any transparent cell that has a filled cell above it
+        // as a hole, even if there is a cluster of transparen cells. For example, 3 
+        // transparent cells in a vertical line will be counted as 3 holes, not one.
+        for (let x = 0; x < width; x++) {
+            const topFilledRow = height - columnHeights[x]; // row location of first filled cell
+            for (let y = topFilledRow; y < height; y++) {
+                if (this.#stackImage.valueAt(x, y) == CellColorIndex.TRANSPARENT) {
+                    holes++;
+                }
+            }
+        }
+
+        // BUMPINESS
+        for (let x = 0; x < width - 1; x++) {
+            bumpiness += Math.abs(columnHeights[x] - columnHeights[x + 1]);
+        }
+
+        console.log("BOARD HEALTH --> aggregate height: " + aggHeight.toString() + " number of holes: "
+        + holes.toString() + " bumpiness: " + bumpiness.toString());
+
+        // do I need to return columnHeights?
+        return { aggHeight, holes, bumpiness, columnHeights };
+    }
 
 
     // resets the board to begin a new game
@@ -653,10 +770,15 @@ class GameBoard {
         let newPiece = this.#activePiece.shallowClone();
         newPiece.offset(x, y);
         if (!this.#validPosition(newPiece)) return false;
+        return this.setPiece(newPiece);
+    }
 
-        // update if offset position is valid
-        this.updatePiece(newPiece);
-        return true;
+    setPiece(newPiece) {
+        if (this.#validPosition(newPiece)) {
+            this.updatePiece(newPiece);
+            return true;
+        }
+        return false;
     }
 
     // returns true if piece can be legally rotated 
@@ -709,6 +831,9 @@ class GameBoard {
         
         // update new piece
         this.#activePiece = newPiece;
+        if (!this.#activePiece) {
+            this.#activePieceIndex = -1;
+        }
 
         //update the ghost piece whenever the active piece is updated
         if (newPiece) {
@@ -870,7 +995,7 @@ class GameBoard {
 
         for (var y = stackTopBounds.top; y < stackTopBounds.bottom; ++y) {
             for (var x = stackTopBounds.left; x < stackTopBounds.right; ++x) {
-                const pixelValue = this.#stackImage.valueAt(x, y);
+                const pixelValue = stackTopImage.valueAt(x, y);
                 if (pixelValue!= CellColorIndex.TRANSPARENT) {
                     // need 50 bits so can't use typical bitwise operations (would convert to 32-bit)
                     const bitMask = 2 ** bitIndex;
@@ -880,6 +1005,13 @@ class GameBoard {
             }
         }
         return keyNum
+    }
+
+    // The active piece key is intended to occupy the upper 3 bits of a 53-bit number
+    activePieceKey() {
+        if (this.#activePieceIndex >= 0) {
+            return this.#activePieceIndex * (2 ** 50);
+        } 
     }
 
 }
@@ -893,7 +1025,10 @@ class GameState {
     #descentInfo;
     #collapseStepTime;
     #timer;
-    #score
+    #score;
+    #lastAiState;
+    #pendingAiOutcome;
+    #aiMode;
     static #theInstance = null;
 
     constructor() {
@@ -904,6 +1039,10 @@ class GameState {
         this.#collapseStepTime = 0;
         this.#timer = null;
         this.#score = 0;
+        this.#lastAiState = null; // holds { stateKey, featuresBefore, actionIndex }
+        this.#pendingAiOutcome = false; // tracks “finalize after collapse” state
+        this.#aiMode = true; 
+        //TODO: maybe add UI to set this aiMode, via setAIMode();
     }
 
     // Should be only one GameState instance
@@ -926,12 +1065,18 @@ class GameState {
         else this.startNewGame();
     }
 
+    
+    startAIButtonClicked() {
+
+    }
+
     startNewGame() {
         GameBoard.instance().resetBoard();
         this.#phase = this.#phases.DESCENT; // begind descent
-        this.#descentInfo.msRate = 1000; // descend one row every 1000ms
+        this.#descentInfo.msRate = this.#descentRate(); // descend one row every 1000ms
         this.#descentInfo.msStepTime = Date.now(); // tracking time of last row advance
         this.#timer = setInterval(this.handleTimer.bind(this), 100); // executes handleTimer() every 100ms
+        this.aiMove();
     }
 
     endGame() {
@@ -968,6 +1113,60 @@ class GameState {
         }
     }
 
+    aiMode() { return this.#aiMode; }
+    setAIMode(doAI) { this.#aiMode = doAI; }
+
+    // grabs stateKey and board features for current state
+    // picks the action index for descending piece (right now it's the left most position, unless random)
+    // stores the stateKey, current features, and chosen action index for the current state
+    aiMove() {
+        if (this.aiMode() && this.playing()) {
+            const availablePlacements = GameBoard.instance().availablePlacements();
+            if (availablePlacements.available.length) {
+                const stateKey = GameBoard.instance().stateKey();
+                // my addition
+                const featuresBefore = GameBoard.instance().getBoardFeatures();
+                const actionIndex = QLearning.instance().getAction(stateKey, availablePlacements);
+                this.#lastAiState = {stateKey, featuresBefore, actionIndex};
+                if (actionIndex >= 0) {
+                    // Clone the piece for colorizing and vertical placement.
+                    const piece = availablePlacements.allPlacements[actionIndex].shape.clone();
+                    // This is at the point of spawning a new piece, so randomize the color.
+                    // Otherwise, all instances of a given shape have the same color (boring).
+                    piece.colorize(randomPieceColorIndex());
+                    const targetBottom = 1; // place the piece so it's just visible at the top of the board
+                    piece.offset(0, targetBottom - piece.visibleBounds().bottom)
+                    if (GameBoard.instance().setPiece(piece))
+                        return;
+                }
+            }
+
+            this.endGame();
+        }
+    }
+
+    // calls the reward calculation and the QLearning update. Resets lastAiState
+    finalizeAiMove() {
+        if (!this.#lastAiState) return; 
+
+        const featuresAfter = GameBoard.instance().getBoardFeatures();
+        const nextStateKey = GameBoard.instance().stateKey();
+        const availableNext = GameBoard.instance().availablePlacements().available;
+        const reward = QLearning.instance().getReward(this.#lastAiState.featuresBefore, featuresAfter);
+
+        QLearning.instance().update(
+            this.#lastAiState.stateKey,
+            this.#lastAiState.actionIndex,
+            reward,
+            nextStateKey,
+            availableNext
+        );
+
+        QLearning.instance().decay();
+        this.#lastAiState = null;
+    }
+
+
     handleTimer() {
         if (this.#phase == this.#phases.DESCENT) this.#stepDescent();
         else if (this.#phase == this.#phases.COLLAPSE) this.#stepCollapse();
@@ -977,6 +1176,11 @@ class GameState {
         this.#phase = this.#phases.DESCENT;
         this.#descentInfo.msStepTime = Date.now();
         if (!GameBoard.instance().startPiece()) this.endGame();
+        this.aiMove();
+    }
+
+    #descentRate() {
+        return this.aiMode() ? 250 : 1000; //ms per step
     }
 
     #stepDescent() {
@@ -989,10 +1193,19 @@ class GameState {
         // if unsuccessful, the piece is placed where it is.
         if (!GameBoard.instance().offsetPiece(0, 1)) {
             GameBoard.instance().placeActivePiece(); 
+            // if rows are completed, we want fo finalize the move after row collapse
             if (GameBoard.instance().hasCompletedRows()) {
+                this.#pendingAiOutcome = true;
                 this.#startRowCollapse();
-            } else if (!GameBoard.instance().startPiece()) { // game ends if start piece has invalid pos
-                this.endGame();
+            } else {
+                this.finalizeAiMove();
+                if (GameBoard.instance().startPiece()) {
+                    this.aiMove();
+                } else {
+                    // TODO: I should work out a way to still perform a q learning update for the terminal move
+                    this.#lastAiState = null; // clears last AI state without updating the q learning
+                    this.endGame(); //game ends if start piece has invalid pos
+                }
             }
         }
         updateDisplay();
@@ -1009,6 +1222,12 @@ class GameState {
 
         this.#score += 100 * GameBoard.instance().completedRowCount();
         GameBoard.instance().collapseCompletedRows();
+
+        if (this.#pendingAiOutcome) {
+            this.finalizeAiMove();
+            this.#pendingAiOutcome = false;
+        }
+
         this.#startDescent();
         updateDisplay();
     }
@@ -1201,19 +1420,30 @@ function tests() {
 
 // this is the Q-learning agent
 class QLearning {
+    static #theInstance;
 
-    constructor(lr = 0.1, gamma = 0.9, epsilon = 0.1) {
+    constructor(lr = 0.1, gamma = 0.9, epsilon = 0.1, weights = {}) {
         // this is our q table. stores values: { state ==> [q_action_0, q_action_1, ...]}
         this.qTable = new Map(); 
         this.lr = lr; // ALPHA, the learning rate
         this.gamma = gamma; // DISCOUNT FACTOR, how much to value future rewards
         this.epsilon = epsilon; // EXPLORATION RATE, probability a random action (exploration) will be taken
+        const defaultWeights = { heightWeight: -0.51, holesWeight: -0.36, bumpWeight: -0.18 };
+        this.weights = { ...defaultWeights, ...weights} // so we can specify different weights if we want
+    }
+
+    static instance() {
+        if (!QLearning.#theInstance) {
+            QLearning.#theInstance = new QLearning();
+            // setting epsilon to 1 to exercise getAction() with random choices
+            QLearning.#theInstance.epsilon = 0.1;
+        }
+        return QLearning.#theInstance;
     }
 
     // returns the qTable values for the given state
-    // available: list of all legal placements for the active piece. comes from enumeratePlacements
-    getQ(stateKey, available) {
-        const actionCount = available.length;
+    // actionCount: number of all possible legal placements for the active piece. comes from enumeratePlacements
+    getQ(stateKey, actionCount) {
         // if current state does not exists in qTable, created an entry with values of 0
         if (!this.qTable.has(stateKey)) {
             // creates an array sized to the number of possible placements. Initialized to zeros
@@ -1222,39 +1452,56 @@ class QLearning {
         return this.qTable.get(stateKey);
     }
 
-    getAction(stateKey, available) {
-        const q = this.getQ(stateKey, available);
+    getAction(stateKey, availablePlacements) {
+        const q = this.getQ(stateKey, availablePlacements.allPlacements.length);
         // if less than epsilon, explore. else, exploit
         if (Math.random() < this.epsilon) {
             // ~~ is a double bitwise NOT operator, which is apparently faster than math.floor()
-            return available[~~(Math.random() * available.length)]; // returns a random action
+            return availablePlacements.available[~~(Math.random() * availablePlacements.available.length)]; // returns a random action
         }
-        return available.reduce((best, a) => q[a] > q[best] ? a : best, available[0]); // returns best known move
+        return availablePlacements.available.reduce((best, a) => (q[a] > q[best] ? a : best), availablePlacements.available[0]); // returns best known move
+    
+
     }
 
     // This is that q-learning function:
-    // r is the reqard which we will define in a separate function? The difference between the health of the states?
     // Q(s, a) ← Q(s, a) + α [r + γ max(a') Q(s', a') − Q(s, a)]
-    update(s, action, reward, s2, available2) {
-        const q = this.qTable.get(s) // get the current state's actions
+    update(stateKey, action, reward, nextStateKey, availableNext) {
+        const q = this.qTable.get(stateKey) // get the current state's actions
         if (!q) return; // just in case
 
-        const q2 = this.qTable.get(s2) // get the next state's actions
-        const maxQ2 = (q2 && available2.length) ? Math.max(...available2.map(a_prime => q2[a_prime])) : 0;
-        
+        const q2 = this.getQ(nextStateKey, availableNext);
+
+        const maxQ2 = q2.length ? Math.max(...q2) : 0; // the max predicted value among action for the next state
         q[action] += this.lr * (reward + this.gamma * maxQ2 - q[action]); // updating the q-value for this action
     }
 
-    // TODO: complete getReward() and getBoardHealth()
-    // decide whether to consider the whole board for things like aggregate height, holes, bumpiness
-    getReward(stateKey, nextStateKey) {
-   
+
+   // use whole board
+    getBoardHealth(features) {
+        const { aggHeight, holes, bumpiness } = features;
+        const { heightWeight, holesWeight, bumpWeight } = this.weights;
+        const health = (
+            heightWeight * aggHeight +
+            holesWeight * holes +
+            bumpWeight * bumpiness
+        );
+
+        console.log("board health: " + health.toString());
+
+        return health;
     }
 
-    // consider: a hole may be detected in the bottom row of the top stack, but if it has
-    // an empty cell below it then it would not be considered a hole in the overall grid.
-    getBoardHealth(stateKey) {
-
+    // should I be using state keys for this?
+    getReward(featuresBefore, featuresAfter) {
+        const healthBefore = this.getBoardHealth(featuresBefore);
+        const healthAfter = this.getBoardHealth(featuresAfter);
+        const reward = healthAfter - healthBefore;
+        
+        console.log("Health before: " + healthBefore.toString() + "Health after: " + healthAfter.toString());
+        console.log("Reward: " + reward.toString());
+        
+        return reward;
     }
 
     // ----------- HELPER FUNCTIONS -----------------------------
@@ -1282,6 +1529,7 @@ class QLearning {
         localStorage.setItem('tetris_qLearning_ai', JSON.stringify(data));
     }
 
+    // TODO: fix previous weights into this 
     load() {
         const saved = localStorage.getItem('tetris_qLearning_ai');
         if (!saved) return false;
@@ -1303,13 +1551,3 @@ class QLearning {
         localStorage.removeItem('tetris_qLearning_ai');
     }
 }
-
-
-
-// TODO: -----------------------------------------
-// add function getUniqueRotations()
-
-// NOTES TO SELF:
-// the board is called in enumeratePlacements(). Should this be the top 5 rows, or the whole board?
-// I would think the top 5 rows should be used for the key, but not necessarily for enumerating placements.
-// It might be unnecessary to have 'available' present in arguments for both getQ() and getAction()
